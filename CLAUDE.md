@@ -1,8 +1,28 @@
 # NBA DFS Stats Lab — Project Guide
 
+> Full build order, phase gates, and acceptance checks live in `docs/ingestion-plan.md`. CLAUDE.md is the always-loaded condensed reference; the plan doc is the phase-by-phase detail. Read it when starting or resuming a phase.
+
 ## Purpose
 
 Ingest DraftKings DFS data into a local SQLite analytics DB (`data/analytics.db`) to support DFS modeling. The analytics DB is the output artifact of this project; the ops DB (`bigdataball`) is a read-only data dependency.
+
+---
+
+## Status
+
+_Update at every gate before `/clear`: done / next / decisions. Keep it short._
+
+**Current phase:** Phase 1 — DB layer
+**Last gate cleared:** Phase 0 — config + CLAUDE.md (done)
+
+**Done**
+- Phase 0: `config.py` populated; `SALARY_DIR`/`LINEUPS_DIR` confirmed; `data/` created.
+
+**Next**
+- Phase 1: `db/schema.py` (DDL + `init_db` + `SCHEMA_VERSION`), `db/connection.py` (PRAGMAs + read-only `attach_ops`), `db/writers.py` (`load_slate`). Gate: `init_db` creates the 5-table DB; `attach_ops` verified read-only.
+
+**Decisions / notes**
+- none beyond the frozen spec yet
 
 ---
 
@@ -115,6 +135,7 @@ src/nba_dfs_stats_lab/
 - **No new dependencies** without asking. Everything needed is already installed.
 - **Keep ruff clean.**
 - **Tests:** pytest unit tests for filename parsing (all three patterns, default-to-main, invalid type), `slate_id` construction, and lineup `dk_id` extraction (apostrophe in name, malformed cell).
+- **Maintain `## Status`.** At each gate, before committing and `/clear`, update the Status section (done / next / decisions). This is what lets a fresh session resume without re-pasting the plan.
 
 ---
 
