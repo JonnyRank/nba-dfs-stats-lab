@@ -15,3 +15,5 @@ data/
 
 # Secrets
 .env
+
+.gemini/styleguide.md
