@@ -9,12 +9,17 @@ fi
 REPO_DIR="${CLAUDE_PROJECT_DIR:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel)}"
 cd "$REPO_DIR"
 
+# --- uv self-update ---------------------------------------------------------
+# Cloud images may ship an old uv whose Python catalog predates 3.14 GA.
+# Self-updating ensures the version manifest includes all current CPython builds.
+echo "[session-start] Updating uv..."
+uv self update || true
+
 # --- Dependencies -----------------------------------------------------------
-# .python-version pins 3.14.2 (Windows local dev), which has no Linux prebuilt.
-# Cloud uses Python 3.13 (available as a system interpreter) instead.
+# uv reads .python-version (3.14.2) and downloads the interpreter if absent.
 # uv sync is idempotent: fast no-op when the lockfile hash is already satisfied.
-echo "[session-start] Syncing dependencies (uv sync --dev --python 3.13)..."
-uv sync --dev --python 3.13
+echo "[session-start] Syncing dependencies (uv sync --dev)..."
+uv sync --dev
 
 # --- PATH export ------------------------------------------------------------
 # Write on every startup|resume; the env file may be fresh after a resume.
