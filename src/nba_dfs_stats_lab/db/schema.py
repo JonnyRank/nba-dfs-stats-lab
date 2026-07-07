@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS lineups (
   PRIMARY KEY (slate_id, final_rank)
 );
 
+-- No FK to lineups: load_slate deletes per-table, so ingest must always
+-- reload lineups and lineup_players together for a slate (Phase 3 invariant).
 CREATE TABLE IF NOT EXISTS lineup_players (
   slate_id   TEXT    NOT NULL,
   final_rank INTEGER NOT NULL,

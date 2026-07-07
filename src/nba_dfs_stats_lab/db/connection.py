@@ -1,10 +1,13 @@
 """SQLite connections: the writable analytics DB and the read-only ops ATTACH."""
 
+import re
 import sqlite3
 from pathlib import Path
 from urllib.parse import quote
 
 from nba_dfs_stats_lab.config import ANALYTICS_DB, OPS_DB
+
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:/")
 
 
 def get_connection(db_path: Path = ANALYTICS_DB) -> sqlite3.Connection:
@@ -30,9 +33,13 @@ def read_only_uri(path: Path) -> str:
     Windows paths need care: backslashes become forward slashes and spaces
     become %20 (e.g. G:\\My Drive\\x.db -> file:///G:/My%20Drive/x.db?mode=ro).
     Drive-letter colons are kept literal — SQLite expects `/G:/`, not `/G%3A/`.
+    Relative paths are rejected: prefixing one with a slash would silently
+    re-root it at the filesystem root.
     """
     quoted = quote(Path(path).as_posix(), safe="/:")
     if not quoted.startswith("/"):
+        if not _WINDOWS_DRIVE.match(quoted):
+            raise ValueError(f"ops path must be absolute, got {str(path)!r}")
         quoted = "/" + quoted  # Windows drive-letter paths lack the leading slash
     return f"file://{quoted}?mode=ro"
 

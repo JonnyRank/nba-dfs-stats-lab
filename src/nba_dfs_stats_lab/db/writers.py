@@ -21,6 +21,10 @@ def load_slate(conn: sqlite3.Connection, slate_id: str, df: pd.DataFrame, table:
     """
     if table not in SLATE_TABLES:
         raise ValueError(f"unknown slate table: {table!r} (expected one of {sorted(SLATE_TABLES)})")
+    if len(df) == 0:
+        # A vacuously-true slate_id check would let an empty frame silently
+        # clear the slate; there is no legitimate "replace with nothing" here.
+        raise ValueError(f"df is empty — refusing to clear {table}.{slate_id!r}")
 
     columns = list(df.columns)
     if "slate_id" not in columns:

@@ -133,6 +133,14 @@ def test_ingest_reload_idempotent(csv_path, conn):
     assert conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0] == 3
 
 
+def test_ingest_warnings_only_still_writes(tmp_path, conn):
+    # Missing value in a nullable metric -> warning, not error: ingest proceeds.
+    p = tmp_path / "gap.csv"
+    p.write_text(CSV_HEADER + "1,A,X,Y,,1.0,30,0.1\n")
+    assert ingest_projections(p, SLATE_ID, conn) == 1
+    assert conn.execute("SELECT minutes FROM projections").fetchone()[0] is None
+
+
 def test_ingest_invalid_writes_nothing(tmp_path, conn):
     p = tmp_path / "dup.csv"
     p.write_text(CSV_HEADER + "1,A,X,Y,30,1.0,30,0.1\n1,B,X,Y,20,1.0,20,0.1\n")

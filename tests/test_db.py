@@ -85,6 +85,11 @@ def test_attach_ops_is_read_only(tmp_path, conn):
         conn.execute("INSERT INTO ops.dim_players VALUES (2, 'Nobody')")
 
 
+def test_read_only_uri_rejects_relative_path():
+    with pytest.raises(ValueError, match="must be absolute"):
+        read_only_uri("ops.db")
+
+
 def test_attach_ops_rejects_bad_alias(conn, tmp_path):
     with pytest.raises(ValueError, match="alias"):
         attach_ops(conn, tmp_path / "x.db", alias="ops; DROP TABLE projections")
@@ -144,6 +149,15 @@ def test_load_slate_nan_becomes_null(conn):
     df.loc[0, "proj_own"] = float("nan")
     load_slate(conn, "s1", df, "projections")
     assert conn.execute("SELECT proj_own FROM projections").fetchone()[0] is None
+
+
+def test_load_slate_rejects_empty_df(conn):
+    load_slate(conn, "s1", _proj_df("s1", [1, 2, 3]), "projections")
+    empty = _proj_df("s1", [1]).iloc[0:0]
+    with pytest.raises(ValueError, match="empty"):
+        load_slate(conn, "s1", empty, "projections")
+    # The existing rows survived — an empty frame must not clear the slate.
+    assert _count(conn, "s1") == 3
 
 
 def test_load_slate_rejects_unknown_table(conn):

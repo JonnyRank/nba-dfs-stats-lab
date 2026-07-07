@@ -132,7 +132,10 @@ def validate_frame(df: pd.DataFrame, schema: SourceSchema) -> ValidationReport:
                 report.error(f"{col.source}: {int(fractional.sum())} non-integer value(s)")
 
     key_source = next(c.source for c in schema.columns if c.canonical == schema.key)
-    dupes = df[key_source][df[key_source].duplicated()]
+    # dropna: pandas treats NaN == NaN in duplicated(), and missing keys are
+    # already reported as their own error above.
+    keys = df[key_source].dropna()
+    dupes = keys[keys.duplicated()]
     if len(dupes) > 0:
         report.error(f"{key_source}: {len(dupes)} duplicate key(s), e.g. {dupes.head(3).tolist()}")
 
@@ -155,5 +158,9 @@ def normalize_frame(df: pd.DataFrame, schema: SourceSchema, slate_id: str) -> pd
             # sources may legitimately have missing optional ints. The writer
             # turns NA into SQL NULL.
             values = values.astype("Int64")
+        elif col.dtype == "str":
+            # Nullable string dtype: keeps missing values as NA (-> SQL NULL)
+            # and stops numerics leaking into text columns in Phase 3 sources.
+            values = values.astype("string")
         out[col.canonical] = values
     return out
