@@ -22,7 +22,7 @@ _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 - Phase 1: `db/schema.py` (DDL + `init_db` + `SCHEMA_VERSION`), `db/connection.py` (PRAGMAs + read-only `attach_ops`), `db/writers.py` (`load_slate`). Gate: `init_db` creates the 5-table DB; `attach_ops` verified read-only.
 
 **Decisions / notes**
-- none beyond the frozen spec yet
+- Cloud sessions run on the image's system Python 3.13 (hook exports `UV_PYTHON=3.13`): the default cloud network policy blocks GitHub release downloads, so uv can't fetch the managed CPython 3.14.2 pinned in `.python-version`. Local dev stays on 3.14.2; `requires-python` widened to `>=3.13` to allow the fallback. Never `uv self update` in the cloud (GitHub API is rate-limited on the shared egress IP) — the session-start hook updates uv from PyPI instead.
 
 ---
 
