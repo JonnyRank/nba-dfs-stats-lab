@@ -22,7 +22,8 @@ _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 - Phase 1: `db/schema.py` (DDL + `init_db` + `SCHEMA_VERSION`), `db/connection.py` (PRAGMAs + read-only `attach_ops`), `db/writers.py` (`load_slate`). Gate: `init_db` creates the 5-table DB; `attach_ops` verified read-only.
 
 **Decisions / notes**
-- Cloud sessions run on the image's system Python 3.13 (hook exports `UV_PYTHON=3.13`): the default cloud network policy blocks GitHub release downloads, so uv can't fetch the managed CPython 3.14.2 pinned in `.python-version`. Local dev stays on 3.14.2; `requires-python` widened to `>=3.13` to allow the fallback. Never `uv self update` in the cloud (GitHub API is rate-limited on the shared egress IP) — the session-start hook updates uv from PyPI instead.
+- Cloud Python: the session-start hook tries the pinned 3.14.2 first and falls back to the image's system Python 3.13 (exporting `UV_PYTHON=3.13`) only if the download fails. uv fetches managed CPython from `releases.astral.sh`, so cloud environments whose Custom network allowlist includes `*.astral.sh` run the pinned 3.14.2; environments without it run the 3.13 fallback. **Both are healthy states** — don't "fix" whichever one fired. `requires-python` stays `>=3.13` so the fallback resolves; the lockfile pins identical package versions on both interpreters.
+- Cloud GitHub access is repo-scoped: a proxy 403s every GitHub path outside the session's bound repos, at every network access level. So never `uv self update` (it hits the GitHub API and misreports the 403 as a rate limit) — the hook updates uv from PyPI instead.
 
 ---
 
