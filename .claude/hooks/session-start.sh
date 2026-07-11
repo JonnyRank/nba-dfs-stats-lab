@@ -1,17 +1,19 @@
 #!/bin/bash
 # SessionStart hook: bootstrap the Python env for Claude Code cloud sessions.
 #
-# Cloud network-policy facts this script is built around (verified 2026-07):
-#   - PyPI (pypi.org / files.pythonhosted.org) bypasses the egress proxy and is
-#     always reachable.
-#   - The GitHub API is rate-limited on the shared egress IP, and github.com
-#     release-asset downloads are blocked (403) under the default policy.
-#     Therefore:
-#       * never `uv self update` (GitHub API) — update uv from PyPI instead;
-#       * uv's managed CPython downloads (python-build-standalone, hosted on
-#         GitHub releases) usually fail — fall back to the image's system
-#         Python and export UV_PYTHON so later `uv run` calls don't retry the
-#         blocked download of the .python-version pin.
+# Cloud network facts this script is built around (verified 2026-07):
+#   - PyPI (pypi.org / files.pythonhosted.org) is always reachable — the
+#     reliable way to install/update uv. `uv self update` is not: cloud
+#     sessions route all GitHub traffic through a proxy that 403s every
+#     GitHub path outside the session's bound repos, at every network
+#     access level. (uv misreports that 403 as "rate limit exceeded".)
+#   - uv downloads managed CPython from releases.astral.sh, falling back to
+#     GitHub releases (always 403, see above). The CDN is reachable only in
+#     environments whose Custom network allowlist includes `*.astral.sh` —
+#     there the pinned interpreter installs in seconds. Everywhere else,
+#     fall back to the image's system Python and export UV_PYTHON so later
+#     `uv run` calls don't retry the blocked download of the
+#     .python-version pin. Both paths are healthy end states.
 set -uo pipefail
 
 # Only run in remote (cloud) environments — never touch a developer's machine.
@@ -57,7 +59,7 @@ if uv python find "$PIN" >/dev/null 2>&1 || uv python install "$PIN" >/dev/null 
   log "Using pinned Python $PIN."
   uv sync --dev || fail "uv sync failed for pinned Python $PIN"
 else
-  log "Python $PIN unavailable (network policy blocks GitHub downloads); using system Python $FALLBACK instead."
+  log "Python $PIN unavailable (likely because this environment's allowlist doesn't cover releases.astral.sh); using system Python $FALLBACK instead."
   uv sync --dev -p "$FALLBACK" || fail "uv sync failed for fallback Python $FALLBACK"
   if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
     echo "export UV_PYTHON=$FALLBACK" >> "$CLAUDE_ENV_FILE"
