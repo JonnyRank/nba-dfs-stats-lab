@@ -59,7 +59,7 @@ if uv python find "$PIN" >/dev/null 2>&1 || uv python install "$PIN" >/dev/null 
   log "Using pinned Python $PIN."
   uv sync --dev || fail "uv sync failed for pinned Python $PIN"
 else
-  log "Python $PIN unavailable (this environment's allowlist doesn't cover releases.astral.sh); using system Python $FALLBACK instead."
+  log "Python $PIN unavailable (likely because this environment's allowlist doesn't cover releases.astral.sh); using system Python $FALLBACK instead."
   uv sync --dev -p "$FALLBACK" || fail "uv sync failed for fallback Python $FALLBACK"
   if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
     echo "export UV_PYTHON=$FALLBACK" >> "$CLAUDE_ENV_FILE"
