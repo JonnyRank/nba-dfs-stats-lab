@@ -88,6 +88,11 @@ def test_lineups_malformed_ts_rejected():
         parse_lineups_filename("ranked-lineups-2026-02-28_9999.csv")
 
 
+def test_lineups_unknown_type_rejected():
+    with pytest.raises(ValueError, match="unknown slate type"):
+        parse_lineups_filename("ranked-lineups-Showdown-2026-02-28.csv")
+
+
 # --- shared validation ---------------------------------------------------------
 
 

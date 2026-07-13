@@ -18,7 +18,7 @@ _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 **Done**
 - Phase 0: `config.py` populated; `SALARY_DIR`/`LINEUPS_DIR` confirmed; `data/` created.
 - Phase 1 (code): `db/schema.py`, `db/connection.py`, `db/writers.py` — written in a cloud session; read-only ATTACH unit-tested against a temp DB, not the real ops DB.
-- Phase 2 (code): `ingest/filenames.py`, `ingest/schemas.py` (contracts + generic validate/normalize + `ValidationReport`), `ingest/projections.py` (read/validate/normalize/ingest). 59 pytest tests, ruff clean.
+- Phase 2 (code): `ingest/filenames.py`, `ingest/schemas.py` (contracts + generic validate/normalize + `ValidationReport`), `ingest/projections.py` (read/validate/normalize/ingest). 60 pytest tests, ruff clean.
 
 **Next**
 - Local (Windows) verification of both deferred gates: run `init_db`, confirm `attach_ops` opens the real ops DB read-only, ingest one real Main slate's projections, check counts + idempotency.
