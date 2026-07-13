@@ -29,6 +29,8 @@ _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 - `ingest_*` raises `SlateValidationError` (carrying the `ValidationReport`) on validation errors instead of returning the report — keeps the pinned `-> int` signature; the orchestrator will catch per-slate.
 - Normalized ints use pandas nullable `Int64`; the writer converts `NA` → SQL NULL.
 - `get_connection` opens with `uri=True` so `ATTACH 'file:…?mode=ro'` is parsed as a URI.
+- Cloud Python: the session-start hook tries the pinned 3.14.2 first and falls back to the image's system Python 3.13 (exporting `UV_PYTHON=3.13`) only if the download fails. uv fetches managed CPython from `releases.astral.sh`, so cloud environments whose Custom network allowlist includes `*.astral.sh` run the pinned 3.14.2; environments without it run the 3.13 fallback. **Both are healthy states** — don't "fix" whichever one fired. `requires-python` stays `>=3.13` so the fallback resolves; the lockfile pins identical package versions on both interpreters.
+- Cloud GitHub access is repo-scoped: a proxy 403s every GitHub path outside the session's bound repos, at every network access level. So never `uv self update` (it hits the GitHub API and misreports the 403 as a rate limit) — the hook updates uv from PyPI instead.
 
 ---
 
