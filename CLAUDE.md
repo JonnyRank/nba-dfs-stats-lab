@@ -12,16 +12,23 @@ Ingest DraftKings DFS data into a local SQLite analytics DB (`data/analytics.db`
 
 _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 
-**Current phase:** Phase 1 — DB layer
+**Current phase:** Phase 2 — code complete, awaiting local gate verification
 **Last gate cleared:** Phase 0 — config + CLAUDE.md (done)
 
 **Done**
 - Phase 0: `config.py` populated; `SALARY_DIR`/`LINEUPS_DIR` confirmed; `data/` created.
+- Phase 1 (code): `db/schema.py`, `db/connection.py`, `db/writers.py` — written in a cloud session; read-only ATTACH unit-tested against a temp DB, not the real ops DB.
+- Phase 2 (code): `ingest/filenames.py`, `ingest/schemas.py` (contracts + generic validate/normalize + `ValidationReport`), `ingest/projections.py` (read/validate/normalize/ingest). 60 pytest tests, ruff clean.
 
 **Next**
-- Phase 1: `db/schema.py` (DDL + `init_db` + `SCHEMA_VERSION`), `db/connection.py` (PRAGMAs + read-only `attach_ops`), `db/writers.py` (`load_slate`). Gate: `init_db` creates the 5-table DB; `attach_ops` verified read-only.
+- Local (Windows) verification of both deferred gates: run `init_db`, confirm `attach_ops` opens the real ops DB read-only, ingest one real Main slate's projections, check counts + idempotency.
+- Then Phase 3: salary + lineups mirroring the projections four-method shape.
 
 **Decisions / notes**
+- Phase 1+2 shipped in one PR: Phase 1 code was never pushed from the earlier session, and Phase 2 depends on it.
+- `ingest_*` raises `SlateValidationError` (carrying the `ValidationReport`) on validation errors instead of returning the report — keeps the pinned `-> int` signature; the orchestrator will catch per-slate.
+- Normalized ints use pandas nullable `Int64`; the writer converts `NA` → SQL NULL.
+- `get_connection` opens with `uri=True` so `ATTACH 'file:…?mode=ro'` is parsed as a URI.
 - Cloud Python: the session-start hook tries the pinned 3.14.2 first and falls back to the image's system Python 3.13 (exporting `UV_PYTHON=3.13`) only if the download fails. uv fetches managed CPython from `releases.astral.sh`, so cloud environments whose Custom network allowlist includes `*.astral.sh` run the pinned 3.14.2; environments without it run the 3.13 fallback. **Both are healthy states** — don't "fix" whichever one fired. `requires-python` stays `>=3.13` so the fallback resolves; the lockfile pins identical package versions on both interpreters.
 - Cloud GitHub access is repo-scoped: a proxy 403s every GitHub path outside the session's bound repos, at every network access level. So never `uv self update` (it hits the GitHub API and misreports the 403 as a rate limit) — the hook updates uv from PyPI instead.
 
