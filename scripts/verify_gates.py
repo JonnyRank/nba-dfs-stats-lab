@@ -55,7 +55,10 @@ def phase1_gate(conn: sqlite3.Connection, ops_path: Path = OPS_DB) -> None:
         check("ops DB rejects writes", False, "probe write unexpectedly succeeded!")
         conn.execute("DROP TABLE ops.__write_probe")  # undo if mode=ro silently failed
     except sqlite3.OperationalError as exc:
-        check("ops DB rejects writes", True, f"write raised: {exc}")
+        # Only a readonly failure proves mode=ro; a locked DB or leftover
+        # probe table also raises OperationalError but proves nothing.
+        is_read_only = "readonly" in str(exc).lower()
+        check("ops DB rejects writes", is_read_only, f"write raised: {exc}")
     conn.execute("DETACH DATABASE ops")
 
 
