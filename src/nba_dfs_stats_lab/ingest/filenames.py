@@ -32,6 +32,21 @@ class ParsedFilename:
 
 
 def _parse(filename: str, pattern: re.Pattern, source: str) -> ParsedFilename:
+    """
+    Parse and validate a filename according to the supplied convention.
+    
+    Parameters:
+        filename (str): Filename to parse.
+        pattern (re.Pattern): Regular expression defining the filename convention.
+        source (str): Name of the file source used in validation errors.
+    
+    Returns:
+        ParsedFilename: Normalized slate type, validated date, and optional timestamp.
+    
+    Raises:
+        ValueError: If the filename does not match the convention, contains an unknown
+            slate type, or contains an invalid date.
+    """
     m = pattern.match(filename)
     if m is None:
         raise ValueError(f"{source} filename does not match convention: {filename!r}")
@@ -55,19 +70,64 @@ def _parse(filename: str, pattern: re.Pattern, source: str) -> ParsedFilename:
 
 
 def parse_salary_filename(filename: str) -> ParsedFilename:
+    """
+    Parse a salary filename into its date, slate type, and optional timestamp.
+    
+    Parameters:
+        filename (str): Salary filename following the expected naming convention.
+    
+    Returns:
+        ParsedFilename: Parsed and validated filename components.
+    
+    Raises:
+        ValueError: If the filename format, slate type, or date is invalid.
+    """
     return _parse(filename, SALARY_RE, "salary")
 
 
 def parse_projections_filename(filename: str) -> ParsedFilename:
+    """
+    Parse a projections filename into its date, slate type, and optional timestamp.
+    
+    Parameters:
+        filename (str): Projections CSV filename following the expected naming convention.
+    
+    Returns:
+        ParsedFilename: The normalized date, slate type, and optional timestamp.
+    
+    Raises:
+        ValueError: If the filename format, slate type, or date is invalid.
+    """
     return _parse(filename, PROJECTIONS_RE, "projections")
 
 
 def parse_lineups_filename(filename: str) -> ParsedFilename:
+    """
+    Parse a ranked lineups filename into its date, slate type, and optional timestamp.
+    
+    Parameters:
+        filename (str): A filename following the ranked lineups naming convention.
+    
+    Returns:
+        ParsedFilename: The normalized date, slate type, and optional timestamp.
+    """
     return _parse(filename, LINEUPS_RE, "lineups")
 
 
 def build_slate_id(date: str, slate_type: str) -> str:
-    """'2026-02-28', 'main' -> '2026-02-28_classic_main'."""
+    """
+    Constructs the canonical slate identifier for a date and slate type.
+    
+    Parameters:
+    	date (str): A date in `YYYY-MM-DD` format.
+    	slate_type (str): The slate type, such as `main`, `early`, or `night`.
+    
+    Returns:
+    	str: An identifier in the format `YYYY-MM-DD_classic_slate_type`.
+    
+    Raises:
+    	ValueError: If the slate type is unknown or the date is invalid.
+    """
     slate_type = slate_type.lower()
     if slate_type not in SLATE_TYPES:
         raise ValueError(f"unknown slate type {slate_type!r} (allowed: {sorted(SLATE_TYPES)})")

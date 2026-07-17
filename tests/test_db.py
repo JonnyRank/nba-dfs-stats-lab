@@ -12,6 +12,7 @@ from nba_dfs_stats_lab.db.writers import load_slate
 
 @pytest.fixture
 def conn(tmp_path):
+    """Create and initialize a temporary analytics database connection for a test."""
     conn = get_connection(tmp_path / "analytics.db")
     init_db(conn)
     yield conn
@@ -99,6 +100,16 @@ def test_attach_ops_rejects_bad_alias(conn, tmp_path):
 
 
 def _proj_df(slate_id, dk_ids):
+    """
+    Create a projection DataFrame for a slate using the provided DraftKings player IDs.
+    
+    Parameters:
+    	slate_id: Slate identifier assigned to each row.
+    	dk_ids: DraftKings player IDs included in the projection data.
+    
+    Returns:
+    	A pandas DataFrame containing projection values for each player.
+    """
     return pd.DataFrame({
         "slate_id": slate_id,
         "dk_id": dk_ids,

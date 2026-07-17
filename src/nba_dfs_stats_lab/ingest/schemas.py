@@ -41,10 +41,20 @@ class ValidationReport:
     warnings: list[str] = field(default_factory=list)
 
     def error(self, msg: str) -> None:
+        """Record a validation error and mark the report as unsuccessful.
+        
+        Parameters:
+        	msg (str): Error message to add to the report.
+        """
         self.errors.append(msg)
         self.ok = False
 
     def warn(self, msg: str) -> None:
+        """Record a non-fatal validation warning.
+        
+        Parameters:
+        	msg (str): Warning message to add to the report.
+        """
         self.warnings.append(msg)
 
 
@@ -52,6 +62,13 @@ class SlateValidationError(Exception):
     """Raised by ingest_* when validation fails; carries the report."""
 
     def __init__(self, source: str, report: ValidationReport):
+        """
+        Initialize the exception with the validation report and source name.
+        
+        Parameters:
+            source (str): Name of the source that failed validation.
+            report (ValidationReport): Report containing the validation errors.
+        """
         self.report = report
         detail = "; ".join(report.errors) or "unknown validation failure"
         super().__init__(f"{source} validation failed ({len(report.errors)} error(s)): {detail}")
@@ -79,14 +96,38 @@ PROJECTIONS_SCHEMA = SourceSchema(
 
 
 def _coerced(series: pd.Series, dtype: str) -> pd.Series:
-    """Numeric coercion used by both validate (to detect) and normalize (to apply)."""
+    """
+    Coerce numeric values to numbers when the declared data type is numeric.
+    
+    Parameters:
+        series (pd.Series): Values to coerce.
+        dtype (str): Declared logical data type.
+    
+    Returns:
+        pd.Series: Numeric values with invalid entries converted to missing values for integer and float types; otherwise, the original values.
+    """
     if dtype in ("int", "float"):
         return pd.to_numeric(series, errors="coerce")
     return series
 
 
 def validate_frame(df: pd.DataFrame, schema: SourceSchema) -> ValidationReport:
-    """Check `df` (as read from the CSV) against the contract. Writes nothing."""
+    """
+    Validate a DataFrame against a source schema.
+    
+    Checks required columns, row presence, unexpected columns, value types,
+    nullability, integer constraints, and duplicate key values. Validation
+    issues are recorded in the returned report; unexpected columns produce
+    warnings and other violations produce errors.
+    
+    Parameters:
+        df (pd.DataFrame): DataFrame read from the source CSV.
+        schema (SourceSchema): Contract defining expected columns and constraints.
+    
+    Returns:
+        ValidationReport: Report containing validation status, errors, warnings,
+            and the input row count.
+    """
     report = ValidationReport(row_count=len(df))
 
     missing = [c.source for c in schema.columns if c.required and c.source not in df.columns]
@@ -143,10 +184,16 @@ def validate_frame(df: pd.DataFrame, schema: SourceSchema) -> ValidationReport:
 
 
 def normalize_frame(df: pd.DataFrame, schema: SourceSchema, slate_id: str) -> pd.DataFrame:
-    """Rename to canonical columns, coerce dtypes, prepend slate_id.
-
-    Assumes `validate_frame` passed — coercion here cannot fail on data that
-    validation accepted.
+    """
+    Normalize source data into canonical columns for analytics storage.
+    
+    Parameters:
+        df (pd.DataFrame): Source data to normalize.
+        schema (SourceSchema): Column mappings and logical data types.
+        slate_id (str): Identifier assigned to every output row.
+    
+    Returns:
+        pd.DataFrame: DataFrame containing `slate_id` and the available canonical columns with normalized dtypes.
     """
     out = pd.DataFrame({"slate_id": slate_id}, index=df.index)
     for col in schema.columns:

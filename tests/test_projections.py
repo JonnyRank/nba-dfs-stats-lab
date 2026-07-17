@@ -23,6 +23,15 @@ SLATE_ID = "2026-02-28_classic_main"
 
 @pytest.fixture
 def csv_path(tmp_path):
+    """
+    Create a temporary projections CSV file populated with valid test data.
+    
+    Parameters:
+    	tmp_path (Path): Temporary directory in which to create the CSV file.
+    
+    Returns:
+    	Path: Path to the created projections CSV file.
+    """
     p = tmp_path / "NBA-Projs-2026-02-28.csv"
     p.write_text(CSV_HEADER + CSV_ROWS)
     return p
@@ -30,6 +39,15 @@ def csv_path(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
+    """
+    Provide a temporary initialized analytics database connection for a test.
+    
+    Parameters:
+        tmp_path (Path): Temporary directory in which to create the database.
+    
+    Yields:
+        Connection: An initialized analytics database connection.
+    """
     conn = get_connection(tmp_path / "analytics.db")
     init_db(conn)
     yield conn

@@ -24,24 +24,60 @@ logger = logging.getLogger(__name__)
 
 
 def read_projections(path: Path) -> pd.DataFrame:
-    """Plain unquoted CSV; pandas infers dtypes, validation checks them."""
+    """
+    Read a projections CSV file into a pandas DataFrame.
+    
+    Parameters:
+        path (Path): Path to the projections CSV file.
+    
+    Returns:
+        pd.DataFrame: The CSV contents with pandas-inferred data types.
+    """
     return pd.read_csv(path)
 
 
 def validate_projections(df: pd.DataFrame) -> ValidationReport:
+    """
+    Validate a projections DataFrame against the projections schema.
+    
+    Parameters:
+        df (pd.DataFrame): The projections data to validate.
+    
+    Returns:
+        ValidationReport: The validation results, including errors and warnings.
+    """
     return validate_frame(df, PROJECTIONS_SCHEMA)
 
 
 def normalize_projections(df: pd.DataFrame, slate_id: str) -> pd.DataFrame:
+    """Normalize validated projections data for a specific slate.
+    
+    Parameters:
+        slate_id (str): Identifier of the slate associated with the projections.
+    
+    Returns:
+        pd.DataFrame: Normalized projections data including the slate identifier.
+    """
     return normalize_frame(df, PROJECTIONS_SCHEMA, slate_id)
 
 
 def ingest_projections(path: Path, slate_id: str, conn: sqlite3.Connection) -> int:
-    """read → validate → (stop if errors) → normalize → load_slate.
-
-    Returns rows written. On validation errors nothing is written and
-    SlateValidationError (carrying the full report) is raised — the orchestrator
-    catches it per-slate; warnings are logged but don't block.
+    """
+    Ingest a projections CSV file into the database for a slate.
+    
+    Warnings are logged during validation. Invalid data raises
+    `SlateValidationError` before any rows are written.
+    
+    Parameters:
+        path (Path): Path to the projections CSV file.
+        slate_id (str): Identifier of the slate associated with the projections.
+        conn (sqlite3.Connection): Database connection used for loading the data.
+    
+    Returns:
+        int: Number of rows written.
+    
+    Raises:
+        SlateValidationError: If validation errors are found.
     """
     path = Path(path)  # tolerate str paths from callers
     df = read_projections(path)

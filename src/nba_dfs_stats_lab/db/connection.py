@@ -11,11 +11,14 @@ _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:/")
 
 
 def get_connection(db_path: Path = ANALYTICS_DB) -> sqlite3.Connection:
-    """Open the analytics DB, creating its parent directory if needed.
-
-    `uri=True` matters even though we pass a plain path: it sets SQLITE_OPEN_URI
-    on the connection, which is what lets a later `ATTACH 'file:...?mode=ro'`
-    be parsed as a URI instead of a literal filename.
+    """
+    Open the analytics database, creating its parent directory when needed.
+    
+    Parameters:
+        db_path (Path): Path to the analytics database.
+    
+    Returns:
+        sqlite3.Connection: A connection with foreign-key enforcement and WAL journaling enabled.
     """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -28,13 +31,17 @@ def get_connection(db_path: Path = ANALYTICS_DB) -> sqlite3.Connection:
 
 
 def read_only_uri(path: Path) -> str:
-    """Build a `file:` URI with mode=ro for an absolute path.
-
-    Windows paths need care: backslashes become forward slashes and spaces
-    become %20 (e.g. G:\\My Drive\\x.db -> file:///G:/My%20Drive/x.db?mode=ro).
-    Drive-letter colons are kept literal — SQLite expects `/G:/`, not `/G%3A/`.
-    Relative paths are rejected: prefixing one with a slash would silently
-    re-root it at the filesystem root.
+    """
+    Build a read-only SQLite `file:` URI for an absolute filesystem path.
+    
+    Parameters:
+        path (Path): Absolute path to the SQLite database.
+    
+    Returns:
+        str: URL-encoded SQLite URI ending with `?mode=ro`.
+    
+    Raises:
+        ValueError: If `path` is not absolute.
     """
     quoted = quote(Path(path).as_posix(), safe="/:")
     if not quoted.startswith("/"):
@@ -45,10 +52,15 @@ def read_only_uri(path: Path) -> str:
 
 
 def attach_ops(conn: sqlite3.Connection, ops_path: Path = OPS_DB, alias: str = "ops") -> None:
-    """ATTACH the ops DB read-only. Any write to `ops.*` raises OperationalError.
-
-    The alias is interpolated (ATTACH can't parameterize it), so restrict it to
-    a bare identifier.
+    """
+    Attach the operations database to a SQLite connection in read-only mode.
+    
+    Parameters:
+        ops_path (Path): Filesystem path to the operations database.
+        alias (str): Identifier used to reference the attached database.
+    
+    Raises:
+        ValueError: If `alias` is not a valid identifier.
     """
     if not alias.isidentifier():
         raise ValueError(f"invalid attach alias: {alias!r}")
