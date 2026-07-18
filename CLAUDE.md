@@ -146,7 +146,7 @@ src/nba_dfs_stats_lab/
 - **Keep ruff clean.**
 - **Tests:** pytest unit tests for filename parsing (all three patterns, default-to-main, invalid type), `slate_id` construction, and lineup `dk_id` extraction (apostrophe in name, malformed cell).
 - **Maintain `## Status`.** At each gate, before committing and `/clear`, update the Status section (done / next / decisions). This is what lets a fresh session resume without re-pasting the plan.
-- **Gates ship with runnable verification.** Any gate Jonny must run locally gets a `scripts/verify_*.py` (PASS/FAIL per check, exit code, tested against synthetic data — see `scripts/verify_gates.py`) or exact paste-able commands, delivered in the same PR as the phase code. Never leave a gate as prose instructions only.
+- **Gates ship with runnable verification.** Any gate Jonny must run locally gets a `scripts/verify_*.py` (PASS/FAIL per check, nonzero exit on failure — see `scripts/verify_gates.py`) or exact paste-able commands, delivered in the same PR as the phase code. Exercise the script against synthetic stand-ins in-session before shipping; the real run needs Jonny's machine. Never leave a gate as prose instructions only.
 
 ---
 
