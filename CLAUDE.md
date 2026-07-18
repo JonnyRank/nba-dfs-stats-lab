@@ -12,20 +12,22 @@ Ingest DraftKings DFS data into a local SQLite analytics DB (`data/analytics.db`
 
 _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 
-**Current phase:** Phase 2 — code complete, awaiting local gate verification
+**Current phase:** Phase 2 — merged to main (PR #2); local gate run pending
 **Last gate cleared:** Phase 0 — config + CLAUDE.md (done)
 
 **Done**
 - Phase 0: `config.py` populated; `SALARY_DIR`/`LINEUPS_DIR` confirmed; `data/` created.
 - Phase 1 (code): `db/schema.py`, `db/connection.py`, `db/writers.py` — written in a cloud session; read-only ATTACH unit-tested against a temp DB, not the real ops DB.
 - Phase 2 (code): `ingest/filenames.py`, `ingest/schemas.py` (contracts + generic validate/normalize + `ValidationReport`), `ingest/projections.py` (read/validate/normalize/ingest). 60 pytest tests, ruff clean.
+- PR #2 merged (squash) after three review rounds; `scripts/verify_gates.py` runs both deferred gates locally.
 
 **Next**
-- Local (Windows) verification of both deferred gates: run `init_db`, confirm `attach_ops` opens the real ops DB read-only, ingest one real Main slate's projections, check counts + idempotency.
+- Jonny runs `uv run python scripts/verify_gates.py` on the Windows machine — it checks both deferred gates: `init_db` tables, `attach_ops` on the real ops DB (probe write must fail readonly), one real Main slate ingest with counts + idempotency.
 - Then Phase 3: salary + lineups mirroring the projections four-method shape.
 
 **Decisions / notes**
 - Phase 1+2 shipped in one PR: Phase 1 code was never pushed from the earlier session, and Phase 2 depends on it.
+- **Every ✋ gate needs a runnable check Jonny can execute** — a `scripts/verify_*.py` with PASS/FAIL output (see `scripts/verify_gates.py`) or exact paste-able commands in the gate report. Jonny reads code but doesn't write it; a gate described only in prose ("confirm X works") is not actionable. Phase 3+ sessions: ship the gate script in the same PR as the phase code.
 - `ingest_*` raises `SlateValidationError` (carrying the `ValidationReport`) on validation errors instead of returning the report — keeps the pinned `-> int` signature; the orchestrator will catch per-slate.
 - Normalized ints use pandas nullable `Int64`; the writer converts `NA` → SQL NULL.
 - `get_connection` opens with `uri=True` so `ATTACH 'file:…?mode=ro'` is parsed as a URI.
@@ -144,6 +146,7 @@ src/nba_dfs_stats_lab/
 - **Keep ruff clean.**
 - **Tests:** pytest unit tests for filename parsing (all three patterns, default-to-main, invalid type), `slate_id` construction, and lineup `dk_id` extraction (apostrophe in name, malformed cell).
 - **Maintain `## Status`.** At each gate, before committing and `/clear`, update the Status section (done / next / decisions). This is what lets a fresh session resume without re-pasting the plan.
+- **Gates ship with runnable verification.** Any gate Jonny must run locally gets a `scripts/verify_*.py` (PASS/FAIL per check, nonzero exit on failure — see `scripts/verify_gates.py`) or exact paste-able commands, delivered in the same PR as the phase code. Exercise the script against synthetic stand-ins in-session before shipping; the real run needs Jonny's machine. Never leave a gate as prose instructions only.
 
 ---
 
