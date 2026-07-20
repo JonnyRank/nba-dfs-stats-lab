@@ -6,8 +6,11 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual environments
-.venv
+# Environments / Workspace-specific files
+venv/
+.venv/
+.env
+.vscode/
 
 # Data files
 *.db
