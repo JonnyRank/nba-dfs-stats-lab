@@ -11,6 +11,7 @@ venv/
 .venv/
 .env
 .vscode/
+nba-dfs-stats-lab.code-workspace
 
 # Data files
 *.db
