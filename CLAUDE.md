@@ -52,7 +52,7 @@ _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 | Constant | Location |
 |---|---|
 | `ANALYTICS_DB` | `data/analytics.db` (repo-local, rebuildable — never on G:\) |
-| `OPS_DB` | `G:\My Drive\Documents\bigdataball\bigdataball-backup\backup_nba_fantasy_logs.db` |
+| `OPS_DB` | `G:\My Drive\Documents\bigdataball\ops_snapshot_nba_fantasy_logs.db` |
 | `PROJECTIONS_DIR` | `G:\My Drive\Documents\CSV-Exports\projections` |
 | `SALARY_DIR` | `G:\My Drive\Documents\NBA-DFS-25-26\NBA-25-26-Classic-Slates` |
 | `LINEUPS_DIR` | `G:\My Drive\Documents\NBA-DFS-25-26\NBA-25-26-Classic-Ranked-Lineups` |

@@ -53,7 +53,7 @@ REPO_ROOT       = Path(__file__).resolve().parents[2]   # …/nba_dfs_stats_lab/
 DATA_DIR        = REPO_ROOT / "data"
 ANALYTICS_DB    = DATA_DIR / "analytics.db"
 
-OPS_DB          = Path(r"G:\My Drive\Documents\bigdataball\bigdataball-backup\backup_nba_fantasy_logs.db")
+OPS_DB          = Path(r"G:\My Drive\Documents\bigdataball\ops_snapshot_fantasy_logs.db")
 PROJECTIONS_DIR = Path(r"G:\My Drive\Documents\CSV-Exports\projections")
 SALARY_DIR      = Path(r"<CONFIRM WITH JONNY>")          # salary CSVs
 LINEUPS_DIR     = Path(r"<CONFIRM WITH JONNY>")          # ranked-lineups CSVs

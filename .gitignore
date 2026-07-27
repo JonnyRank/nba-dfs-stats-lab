@@ -17,6 +17,9 @@ nba-dfs-stats-lab.code-workspace
 *.db
 data/
 
+# MCP Server config files
+.devdbrc
+
 # Secrets
 .env
 
