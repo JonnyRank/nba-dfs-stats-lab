@@ -12,22 +12,32 @@ Ingest DraftKings DFS data into a local SQLite analytics DB (`data/analytics.db`
 
 _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 
-**Current phase:** Phase 2 — merged to main (PR #2); local gate run pending
-**Last gate cleared:** Phase 0 — config + CLAUDE.md (done)
+**Current phase:** Phase 3 — salary + lineups (not started)
+**Last gate cleared:** Phases 1 + 2 — `scripts/verify_gates.py` all-PASS on the Windows machine, 2026-07-26
 
 **Done**
 - Phase 0: `config.py` populated; `SALARY_DIR`/`LINEUPS_DIR` confirmed; `data/` created.
 - Phase 1 (code): `db/schema.py`, `db/connection.py`, `db/writers.py` — written in a cloud session; read-only ATTACH unit-tested against a temp DB, not the real ops DB.
 - Phase 2 (code): `ingest/filenames.py`, `ingest/schemas.py` (contracts + generic validate/normalize + `ValidationReport`), `ingest/projections.py` (read/validate/normalize/ingest). 60 pytest tests, ruff clean.
 - PR #2 merged (squash) after three review rounds; `scripts/verify_gates.py` runs both deferred gates locally.
+- **Phase 1 + 2 gates cleared** (2026-07-26, `uv run python scripts/verify_gates.py`, all PASS):
+  - all five tables created in `data/analytics.db`; ops DB attached with 6 tables visible; probe write rejected with `attempt to write a readonly database` (proves `mode=ro`).
+  - `NBA-Projs-2026-05-18.csv` → `2026-05-18_classic_main`, 72 rows; re-ingest wrote 72 with total unchanged at 72 (idempotent). `minutes`/`fppm`/`proj_pts`/`proj_own` all populated.
+- `data/analytics.db` now exists and holds exactly that one projections slate. It is gitignored and rebuildable — delete it and re-run the gate any time.
+
+**Side quest (done): lineups filename reconciliation**
+- The optimizer named `ranked-lineups-*` files from run time, not slate date. `scripts/match_lineups_to_slates.py` matches each file to its true slate by DK ID set intersection (DK ID blocks are disjoint across slates — verified, 0 collisions across 409 slates). 219/226 matched at 100% coverage; 26 dates and 5 slate types corrected. Outputs + full write-up in `data/lineups_slate_match/README.md` (gitignored); corrected copies in `relabeled/`.
+- **Phase 3 lineups loader must not use `_HHMMSS` for keep-latest.** Renaming preserves the suffix but the suffix is a *generation* time, so for 7 slates it now selects the wrong file. Use `manifest.csv` → `generated_at` / `is_latest_for_slate` instead.
+- 7 files are unmatchable: no slate CSV exists for Feb 13–22, 2026. Parked in `unmatched/`.
 
 **Next**
-- Jonny runs `uv run python scripts/verify_gates.py` on the Windows machine — it checks both deferred gates: `init_db` tables, `attach_ops` on the real ops DB (probe write must fail readonly), one real Main slate ingest with counts + idempotency.
-- Then Phase 3: salary + lineups mirroring the projections four-method shape.
+- Phase 3: salary + lineups mirroring the projections four-method shape. Ship `scripts/verify_phase3.py` in the same PR (see the gate rule below), and read the two lineups notes in the side-quest section above before designing the lineups loader.
 
 **Decisions / notes**
 - Phase 1+2 shipped in one PR: Phase 1 code was never pushed from the earlier session, and Phase 2 depends on it.
 - **Every ✋ gate needs a runnable check Jonny can execute** — a `scripts/verify_*.py` with PASS/FAIL output (see `scripts/verify_gates.py`) or exact paste-able commands in the gate report. Jonny reads code but doesn't write it; a gate described only in prose ("confirm X works") is not actionable. Phase 3+ sessions: ship the gate script in the same PR as the phase code.
+- **`PROJECTIONS_DIR` moved** from `CSV-Exports\projections` to `NBA-DFS-25-26\NBA-25-26-Projs-CSVs` (2026-07-26). The old directory's 302 files were unusable: names carried a `_HH-MM-SS` suffix the pinned regex rejects, and the files only had `ID,Projection,Own_Proj` — no `Minutes`/`FPPM`, both required by `PROJECTIONS_SCHEMA`. The new directory's 49 files parse and validate 49/49 clean with zero warnings. Note `docs/ingestion-plan.md` still shows the old path in its Phase 0 snippet; config.py is authoritative.
+- The new projections files were date-corrected by content in a separate session, the same defect the lineups side quest fixed. Verified independently here by DK ID intersection: **46 of 49 confirmed against their claimed slate, 0 mismatches**. The 3 unconfirmed (`2026-02-19`, `-02-20`, `-02-22`) are the ones with no salary CSV at all.
 - `ingest_*` raises `SlateValidationError` (carrying the `ValidationReport`) on validation errors instead of returning the report — keeps the pinned `-> int` signature; the orchestrator will catch per-slate.
 - Normalized ints use pandas nullable `Int64`; the writer converts `NA` → SQL NULL.
 - `get_connection` opens with `uri=True` so `ATTACH 'file:…?mode=ro'` is parsed as a URI.
@@ -53,7 +63,7 @@ _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 |---|---|
 | `ANALYTICS_DB` | `data/analytics.db` (repo-local, rebuildable — never on G:\) |
 | `OPS_DB` | `G:\My Drive\Documents\bigdataball\ops_snapshot_nba_fantasy_logs.db` |
-| `PROJECTIONS_DIR` | `G:\My Drive\Documents\CSV-Exports\projections` |
+| `PROJECTIONS_DIR` | `G:\My Drive\Documents\NBA-DFS-25-26\NBA-25-26-Projs-CSVs` |
 | `SALARY_DIR` | `G:\My Drive\Documents\NBA-DFS-25-26\NBA-25-26-Classic-Slates` |
 | `LINEUPS_DIR` | `G:\My Drive\Documents\NBA-DFS-25-26\NBA-25-26-Classic-Ranked-Lineups` |
 

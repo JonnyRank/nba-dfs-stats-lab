@@ -53,13 +53,19 @@ REPO_ROOT       = Path(__file__).resolve().parents[2]   # …/nba_dfs_stats_lab/
 DATA_DIR        = REPO_ROOT / "data"
 ANALYTICS_DB    = DATA_DIR / "analytics.db"
 
-OPS_DB          = Path(r"G:\My Drive\Documents\bigdataball\ops_snapshot_fantasy_logs.db")
+OPS_DB          = Path(r"G:\My Drive\Documents\bigdataball\ops_snapshot_nba_fantasy_logs.db")
 PROJECTIONS_DIR = Path(r"G:\My Drive\Documents\CSV-Exports\projections")
 SALARY_DIR      = Path(r"<CONFIRM WITH JONNY>")          # salary CSVs
 LINEUPS_DIR     = Path(r"<CONFIRM WITH JONNY>")          # ranked-lineups CSVs
 ```
 
 **In Phase 0, ask Jonny to confirm `SALARY_DIR` and `LINEUPS_DIR`** — only `PROJECTIONS_DIR` and `OPS_DB` are known.
+
+> **Superseded — this snippet is the original Phase 0 proposal, kept for history.**
+> `src/nba_dfs_stats_lab/config.py` is authoritative. `PROJECTIONS_DIR` moved to
+> `G:\My Drive\Documents\NBA-DFS-25-26\NBA-25-26-Projs-CSVs` on 2026-07-26 —
+> see the `PROJECTIONS_DIR` note in CLAUDE.md's Status for why. `SALARY_DIR` and
+> `LINEUPS_DIR` were confirmed in Phase 0; see the key-paths table in CLAUDE.md.
 
 ---
 
@@ -181,13 +187,13 @@ Phases map to the spec's milestones, with one refinement: **the crosswalk is bui
 - Write a `CLAUDE.md` capturing: project purpose, the data-only ops rule, the slate key, the five tables, the filename rules, and these working rules — so future sessions inherit the spec.
 - In that `CLAUDE.md`, include **(a)** a `## Status` section as a living progress log (current phase, done, next, decisions) and **(b)** a pointer near the top: *"Full build order, phase gates, and acceptance checks live in `docs/ingestion-plan.md`; read it when starting or resuming a phase."*
 - Ensure this plan doc is committed in the repo at `docs/ingestion-plan.md` so a cleared session can read it on demand.
-- ✋ **Gate:** show `config.py` + `CLAUDE.md`, confirm paths resolve.
+- ✋ **Gate — CLEARED:** `config.py` + `CLAUDE.md` reviewed, all five paths resolve.
 
 ### Phase 1 — DB layer
 - `db/schema.py`: the DDL above + `init_db(conn)` (creates all tables idempotently) and a `SCHEMA_VERSION` constant.
 - `db/connection.py`: `get_connection(db_path=ANALYTICS_DB)` setting sensible PRAGMAs (`foreign_keys=ON`, WAL); `attach_ops(conn, ops_path=OPS_DB)` using a **read-only** URI (`file:…?mode=ro`, correctly URL-encoding the Windows path's spaces/backslashes — verify the ATTACH actually opens read-only).
 - `db/writers.py`: `load_slate(conn, slate_id, df, table) -> int` — inside one transaction, `DELETE … WHERE slate_id = ?` then append `df`. Idempotent re-load.
-- ✋ **Gate:** run `init_db`, confirm `analytics.db` exists with all five tables; confirm `attach_ops` opens read-only (a write to ops should fail).
+- ✋ **Gate — CLEARED 2026-07-26** (`uv run python scripts/verify_gates.py`): all five tables present in `data/analytics.db`; ops DB attached, 6 tables visible; probe write rejected with `attempt to write a readonly database`.
 
 ### Phase 2 — Projections (the reference source)
 Build the four-method shape — this is the template the other two copy:
@@ -201,7 +207,7 @@ ingest_projections(path, slate_id, conn) -> int        # read→validate→(stop
 - `ingest/schemas.py`: declarative column contract (source col → canonical → dtype → required) that both validate and normalize read from.
 - `ValidationReport` dataclass: `ok, row_count, errors, warnings`. **Surface** problems — never silently drop rows; if invalid, write nothing and return the report.
 - Load one real Main slate.
-- ✋ **Gate:** show counts (`SELECT COUNT(*), COUNT(DISTINCT slate_id) FROM projections`), re-load the same slate and confirm the count is unchanged (idempotency), and show a few rows.
+- ✋ **Gate — CLEARED 2026-07-26** (`uv run python scripts/verify_gates.py`): `NBA-Projs-2026-05-18.csv` → `2026-05-18_classic_main`, 72 rows / 1 slate; re-ingest wrote 72 with the total unchanged at 72; sample rows show all five canonical columns populated.
 
 ### Phase 3 — Salary + Lineups
 - `ingest/salary.py`: mirror the shape → `slate_players` (incl. `actual_fpts`, int coercion on the quoted `DFS ID`/`Salary`).
