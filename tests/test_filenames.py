@@ -7,6 +7,8 @@ from nba_dfs_stats_lab.ingest.filenames import (
     parse_lineups_filename,
     parse_projections_filename,
     parse_salary_filename,
+    parse_slate_id,
+    salary_filename,
 )
 
 # --- salary: <Type>-<YYYY-MM-DD>.csv (Type explicit, incl. Main) --------------
@@ -20,6 +22,9 @@ def test_salary_main_explicit():
 @pytest.mark.parametrize("raw,expected", [
     ("Early", "early"), ("Turbo", "turbo"), ("Afternoon", "afternoon"),
     ("Night", "night"), ("MAIN", "main"),
+    # `late` was added to the pinned set in Phase 3: Late-2026-01-04/-01-26/
+    # -02-07 are real salary files.
+    ("Late", "late"),
 ])
 def test_salary_type_normalized_lowercase(raw, expected):
     assert parse_salary_filename(f"{raw}-2026-01-15.csv").slate_type == expected
@@ -120,3 +125,39 @@ def test_build_slate_id_rejects_unknown_type():
 def test_build_slate_id_rejects_bad_date():
     with pytest.raises(ValueError):
         build_slate_id("2026-2-8", "main")
+
+
+# --- parse_slate_id / salary_filename (the inverses) -----------------------------
+
+
+@pytest.mark.parametrize("date,slate_type", [
+    ("2026-02-28", "main"), ("2026-03-13", "night"), ("2026-01-04", "late"),
+])
+def test_parse_slate_id_round_trips(date, slate_type):
+    p = parse_slate_id(build_slate_id(date, slate_type))
+    assert (p.date, p.slate_type) == (date, slate_type)
+
+
+def test_parse_slate_id_rejects_wrong_game_style():
+    with pytest.raises(ValueError, match="malformed slate_id"):
+        parse_slate_id("2026-02-28_showdown_main")
+
+
+def test_parse_slate_id_rejects_unknown_type():
+    with pytest.raises(ValueError, match="unknown slate type"):
+        parse_slate_id("2026-02-28_classic_captain")
+
+
+@pytest.mark.parametrize("slate_type,expected", [
+    ("main", "Main-2026-05-18.csv"),      # Main is explicit in salary filenames
+    ("night", "Night-2026-05-18.csv"),
+    ("afternoon", "Afternoon-2026-05-18.csv"),
+])
+def test_salary_filename(slate_type, expected):
+    assert salary_filename("2026-05-18", slate_type) == expected
+
+
+def test_salary_filename_round_trips():
+    name = salary_filename("2026-05-18", "turbo")
+    p = parse_salary_filename(name)
+    assert (p.date, p.slate_type) == ("2026-05-18", "turbo")

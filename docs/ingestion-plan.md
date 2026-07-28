@@ -76,7 +76,9 @@ LINEUPS_DIR     = Path(r"<CONFIRM WITH JONNY>")          # ranked-lineups CSVs
 ```
 slate_id = f"{date}_classic_{slate_type}"      # e.g. 2026-02-28_classic_main
 ```
-`game_style` is constant `classic` this phase (Showdown later, its own files + tables). `slate_type` ∈ `{main, early, turbo, afternoon, night}`, lowercased.
+`game_style` is constant `classic` this phase (Showdown later, its own files + tables). `slate_type` ∈ `{main, early, turbo, afternoon, night, late}`, lowercased.
+
+> **Amended Phase 3 (2026-07-27):** `late` was added to the set above — the originally pinned five omitted it, but `Late-2026-01-04/-01-26/-02-07.csv` are real salary files. `ingest/filenames.py` is authoritative.
 
 ### Filename → (date, slate_type)
 
@@ -94,7 +96,9 @@ lineups:      ranked-lineups-[<Type>-]<YYYY-MM-DD>[_<HHMMSS>].csv
 ```
 
 - Normalize `type`: lowercase; if the optional group is absent ⇒ `main`. Validate against the allowed set; an unknown type is a validation error.
-- **Lineups keep-latest:** a slate can have multiple lineups files differing by `_HHMMSS`. Group candidate files by `(date, type)` and select the one with the **max** `ts`. Keep the suffix in the filename; it's the version selector, not stored in the DB.
+- **Lineups keep-latest:** a slate can have multiple lineups files. Select the one with the **max** `generated_at` in `data/lineups_slate_match/manifest.csv`, keyed by `slate_id`. The `_HHMMSS` filename suffix is **not** the selector — see the amendment below.
+
+> **Amended Phase 3 (2026-07-27):** keep-latest originally read the `_HHMMSS` suffix. The relabeling side quest (see Phase 3 below and `data/lineups_slate_match/README.md`) rewrote each file's date/type from its DK-ID content but preserved the suffix, which is a *generation* time — so for 7 slates the max suffix now points at the wrong file. `latest_lineups_by_slate()` in `ingest/lineups.py` is authoritative.
 
 ### Tables — DDL (build exactly this)
 
@@ -134,9 +138,9 @@ CREATE TABLE IF NOT EXISTS lineups (
   total_projection  REAL,
   total_ownership   REAL,
   geomean_ownership REAL,
-  proj_rank         INTEGER,
-  own_rank          REAL,                   -- read as REAL; sample had fractional values
-  geo_rank          INTEGER,
+  proj_rank         REAL,                   -- average-rank; ties split (amended, see below)
+  own_rank          REAL,                   -- average-rank; ties split
+  geo_rank          REAL,                   -- average-rank; ties split (amended, see below)
   PRIMARY KEY (slate_id, final_rank)
 );
 
@@ -151,6 +155,12 @@ CREATE TABLE IF NOT EXISTS lineup_players (
 CREATE INDEX IF NOT EXISTS ix_lineup_players_slate_dk
   ON lineup_players (slate_id, dk_id);      -- exposure rollups
 ```
+
+> **Amended Phase 3 (2026-07-27):** `lineups.proj_rank` and `geo_rank` are REAL above;
+> the originally pinned DDL had them INTEGER. All three ranks are average-ranks that split ties; the sample slate
+> just happened to show ties only in `own_rank`. Across the 43 reconciled slates
+> `Proj_Rank` is fractional 2266× and `Geo_Rank` 3002×. `SCHEMA_VERSION` is now 2 and
+> `db/schema.py` is authoritative.
 
 ### Column mappings (source header → canonical)
 
@@ -212,11 +222,12 @@ ingest_projections(path, slate_id, conn) -> int        # read→validate→(stop
 ### Phase 3 — Salary + Lineups
 - `ingest/salary.py`: mirror the shape → `slate_players` (incl. `actual_fpts`, int coercion on the quoted `DFS ID`/`Salary`).
 - `ingest/lineups.py`: mirror the shape, plus the melt + id-extract → `lineups` and `lineup_players` (two `load_slate` calls). `validate_lineups` must assert all 8 slots per row yield exactly one integer id **before** the melt.
-- Lineups discovery applies keep-latest by `_HHMMSS`.
+- ~~Lineups discovery applies keep-latest by `_HHMMSS`.~~ **Superseded:** keep-latest selects on `manifest.csv` → `generated_at`. The relabeling side quest left the `_HHMMSS` suffix as a *generation* time, so it picks the wrong file for 7 slates. See `data/lineups_slate_match/README.md` and the CLAUDE.md Status.
 - Load the same slate's salary + lineups.
-- ✋ **Gate — integrity checks (Jonny can run these):**
+- ✋ **Gate — CLEARED 2026-07-27** (`uv run python scripts/verify_phase3.py`, run on `2026-05-18_classic_main`, `2026-03-13_classic_night`, `2026-04-02_classic_main`): salary and lineups both ingested and idempotent on re-ingest; 8 players per lineup on every lineup; 0 orphan rostered players; every lineup header has its slot rows. `--list` enumerates the 43 slates with both sources.
   - 8 players per lineup: `SELECT final_rank, COUNT(*) FROM lineup_players WHERE slate_id=? GROUP BY final_rank` → all 8.
   - No orphan rostered players: `SELECT COUNT(*) FROM lineup_players lp LEFT JOIN slate_players sp ON lp.slate_id=sp.slate_id AND lp.dk_id=sp.dk_id WHERE sp.dk_id IS NULL` → 0.
+  - Two spec corrections forced by the real files: `late` is a sixth slate type, and `lineups.proj_rank`/`geo_rank` are REAL not INTEGER (`SCHEMA_VERSION` 2). Both recorded in CLAUDE.md Decisions.
 
 ### Phase 4 — Orchestrator + backfill
 - `ingest/orchestrator.py`: `ingest_day(date, slate_type, conn)` building `slate_id` and calling the three source ingests; a discovery routine that finds the matching files across the three dirs for a given slate; and a `--dry-run` that validates without writing.

@@ -31,6 +31,10 @@ class SourceSchema:
     key: str  # canonical unique-key column within a slate
     columns: tuple[ColumnSpec, ...]
     drop: tuple[str, ...] = ()  # known source columns we intentionally discard
+    # Known source columns this schema doesn't map, but which the source module
+    # consumes itself (e.g. the lineups slot columns, melted into a second
+    # table). Neither dropped nor mapped — just not "unexpected".
+    handled_elsewhere: tuple[str, ...] = ()
 
 
 @dataclass
@@ -75,6 +79,52 @@ PROJECTIONS_SCHEMA = SourceSchema(
 )
 
 
+# --- Salary ------------------------------------------------------------------
+
+SALARY_SCHEMA = SourceSchema(
+    name="salary",
+    table="slate_players",
+    key="dk_id",
+    columns=(
+        # The salary CSV is fully quoted, so pandas reads these as strings on
+        # some files and ints on others; `_coerced` normalizes either way.
+        ColumnSpec("DFS ID", "dk_id", "int", nullable=False),
+        ColumnSpec("Name", "name", "str", nullable=False),
+        ColumnSpec("Position", "positions", "str"),  # kept raw, e.g. "PG/G/UTIL"
+        ColumnSpec("Team", "team", "str"),
+        ColumnSpec("Opponent", "opp", "str"),
+        ColumnSpec("Salary", "salary", "int"),
+        ColumnSpec("Actual_FPTs", "actual_fpts", "float"),  # NULL until played
+    ),
+)
+
+
+# --- Lineups (header grain; the 8 slot columns are melted separately) ---------
+
+LINEUP_SLOTS = ("PG", "SG", "SF", "PF", "C", "G", "F", "UTIL")
+
+LINEUPS_SCHEMA = SourceSchema(
+    name="lineups",
+    table="lineups",
+    key="final_rank",
+    columns=(
+        ColumnSpec("Final_Rank", "final_rank", "int", nullable=False),
+        ColumnSpec("Lineup_Score", "lineup_score", "float"),
+        ColumnSpec("Total_Projection", "total_projection", "float"),
+        ColumnSpec("Total_Ownership", "total_ownership", "float"),
+        ColumnSpec("Geomean_Ownership", "geomean_ownership", "float"),
+        # All three ranks are average-ranks — ties are split, so fractional
+        # values are expected. See the DDL note in db/schema.py.
+        ColumnSpec("Proj_Rank", "proj_rank", "float"),
+        ColumnSpec("Own_Rank", "own_rank", "float"),
+        ColumnSpec("Geo_Rank", "geo_rank", "float"),
+    ),
+    # The slot columns are not dropped data — ingest/lineups.py validates and
+    # melts them into lineup_players.
+    handled_elsewhere=LINEUP_SLOTS,
+)
+
+
 # --- Generic machinery --------------------------------------------------------
 
 
@@ -98,7 +148,9 @@ def validate_frame(df: pd.DataFrame, schema: SourceSchema) -> ValidationReport:
         report.error("file has 0 data rows")
         return report
 
-    expected = {c.source for c in schema.columns} | set(schema.drop)
+    expected = (
+        {c.source for c in schema.columns} | set(schema.drop) | set(schema.handled_elsewhere)
+    )
     unexpected = [c for c in df.columns if c not in expected]
     if unexpected:
         report.warn(f"unexpected column(s) ignored: {unexpected}")

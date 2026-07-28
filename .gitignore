@@ -6,6 +6,10 @@ dist/
 wheels/
 *.egg-info
 
+# Test artifacts (.pytest_cache self-ignores; coverage.py does not)
+.coverage
+htmlcov/
+
 # Environments / Workspace-specific files
 venv/
 .venv/
