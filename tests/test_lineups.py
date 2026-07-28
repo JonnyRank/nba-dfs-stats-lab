@@ -1,5 +1,7 @@
 """Lineups source: dk_id extraction, slot validation, the melt, and discovery."""
 
+from datetime import datetime
+
 import pytest
 
 from nba_dfs_stats_lab.db.connection import get_connection
@@ -341,3 +343,42 @@ def test_keep_latest_silent_when_manifest_agrees(manifest, caplog):
     with caplog.at_level("WARNING"):
         latest_lineups_by_slate(*manifest)
     assert caplog.text == ""
+
+
+def test_keep_latest_orders_mixed_iso_spellings_correctly(manifest):
+    # Regression: keep-latest used to compare generated_at as a string.
+    # `datetime.fromisoformat` also accepts a space separator, so
+    # "2026-02-11 09:00:00" sorted BELOW "2026-02-10T18:23:19" on 'T' > ' '
+    # and the older file silently won the slate.
+    m, rel = manifest
+    m.write_text(m.read_text().replace("2026-02-11T14:55:46", "2026-02-11 09:00:00"))
+    latest = latest_lineups_by_slate(m, rel)
+    assert latest["2026-02-10_classic_main"].path.name == "ranked-lineups-2026-02-10_145546.csv"
+
+
+def test_manifest_parses_generated_at_once(manifest):
+    files = {f.path.name: f for f in load_lineups_manifest(*manifest)}
+    f = files["ranked-lineups-2026-02-10_145546.csv"]
+    assert f.generated_dt == datetime(2026, 2, 11, 14, 55, 46)
+    assert f.generated_at == "2026-02-11T14:55:46"  # raw spelling preserved
+
+
+def test_manifest_mixing_aware_and_naive_timestamps_raises(manifest):
+    # Comparing an aware datetime to a naive one raises TypeError mid-loop;
+    # reject it up front instead.
+    m, rel = manifest
+    m.write_text(m.read_text().replace("2026-02-11T14:55:46", "2026-02-11T14:55:46+00:00"))
+    with pytest.raises(ValueError, match="timezone-aware and naive"):
+        load_lineups_manifest(m, rel)
+
+
+def test_manifest_all_aware_timestamps_are_fine(manifest):
+    m, rel = manifest
+    m.write_text(
+        m.read_text()
+        .replace("2026-02-10T18:23:19", "2026-02-10T18:23:19+00:00")
+        .replace("2026-02-11T14:55:46", "2026-02-11T14:55:46+00:00")
+        .replace("2026-03-13T20:58:56", "2026-03-13T20:58:56+00:00")
+    )
+    latest = latest_lineups_by_slate(m, rel)
+    assert latest["2026-02-10_classic_main"].path.name == "ranked-lineups-2026-02-10_145546.csv"

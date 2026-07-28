@@ -54,7 +54,7 @@ def test_fresh_db_needs_no_migration(tmp_path):
 def test_empty_v1_db_migrates(v1_conn):
     assert _rank_types(v1_conn)["proj_rank"] == "INTEGER"
     actions = migrate(v1_conn)
-    assert len(actions) == 1 and "v1->v2" in actions[0]
+    assert len(actions) == 1 and "not REAL" in actions[0]
     init_db(v1_conn)
     types = _rank_types(v1_conn)
     assert (types["proj_rank"], types["own_rank"], types["geo_rank"]) == ("REAL", "REAL", "REAL")
@@ -92,4 +92,37 @@ def test_migrate_detects_drift_even_when_version_says_current(v1_conn):
     v1_conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     v1_conn.commit()
     actions = migrate(v1_conn)
-    assert len(actions) == 1 and "v1->v2" in actions[0]
+    assert len(actions) == 1 and "not REAL" in actions[0]
+
+
+OWN_RANK_DRIFT_DDL = V1_LINEUPS_DDL.replace("own_rank          REAL", "own_rank          INTEGER") \
+    .replace("proj_rank         INTEGER", "proj_rank         REAL") \
+    .replace("geo_rank          INTEGER", "geo_rank          REAL")
+
+
+def test_own_rank_drift_is_detected_even_when_stamped_current(tmp_path):
+    # own_rank was already REAL in v1, so this shape never shipped — but the
+    # check exists to detect drift from the *live* types, and a hand-edited or
+    # half-migrated DB stamped v2 would otherwise keep an INTEGER rank column
+    # that init_db's IF NOT EXISTS DDL will never correct.
+    conn = get_connection(tmp_path / "drift.db")
+    conn.executescript(OWN_RANK_DRIFT_DDL)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.commit()
+
+    actions = migrate(conn)
+    assert len(actions) == 1 and "own_rank" in actions[0]
+    init_db(conn)
+    assert _rank_types(conn)["own_rank"] == "REAL"
+    conn.close()
+
+
+def test_own_rank_drift_with_rows_refuses_rather_than_dropping(tmp_path):
+    conn = get_connection(tmp_path / "drift_rows.db")
+    conn.executescript(OWN_RANK_DRIFT_DDL)
+    conn.execute("INSERT INTO lineups (slate_id, final_rank, own_rank) VALUES ('s1', 1, 4)")
+    conn.commit()
+    with pytest.raises(SchemaMigrationError, match="own_rank"):
+        migrate(conn)
+    assert conn.execute("SELECT COUNT(*) FROM lineups").fetchone()[0] == 1
+    conn.close()

@@ -183,24 +183,30 @@ def ingest_lineups(path: Path, slate_id: str, conn: sqlite3.Connection) -> Lineu
 # --- Discovery (keep-latest by true generation time) ---------------------------
 
 
-def _is_iso_timestamp(value: object) -> bool:
-    """True if `value` is a string SQLite/Python would read as an ISO timestamp."""
+def _parse_iso_timestamp(value: object) -> datetime | None:
+    """Parse an ISO-8601 cell, or None if it isn't one."""
     if not isinstance(value, str):
-        return False
+        return None
     try:
-        datetime.fromisoformat(value)
+        return datetime.fromisoformat(value)
     except ValueError:
-        return False
-    return True
+        return None
 
 
 @dataclass(frozen=True)
 class LineupsFile:
     slate_id: str
     path: Path
-    generated_at: str  # ISO-8601, from the manifest — the keep-latest key
+    generated_at: str  # ISO-8601 as written in the manifest, for display
     n_lineups: int
     manifest_is_latest: bool  # the manifest's own keep-latest flag, for cross-check
+    # The keep-latest key. Parsed rather than compared as a string:
+    # `datetime.fromisoformat` accepts a space separator, UTC offsets and
+    # fractional seconds, none of which sort correctly lexically
+    # ("2026-02-10 18:23:19" < "2026-02-10T09:00:00"). The manifest is uniform
+    # today, but the validator above deliberately isn't, so comparing the raw
+    # string would silently depend on the generator's formatting.
+    generated_dt: datetime
 
 
 _MANIFEST_COLUMNS = ("slate_id", "relabeled_name", "generated_at", "n_lineups")
@@ -233,20 +239,31 @@ def load_lineups_manifest(
             f"(has {list(df.columns)}). {_REBUILD_HINT}"
         )
 
-    # generated_at is compared as a string for keep-latest, which is only valid
-    # for well-formed ISO-8601. A blank cell would stringify to "nan", and "n"
-    # sorts above every digit — that row would silently win keep-latest for its
-    # slate. The manifest is a gitignored artifact from a separate script, so
-    # fail loudly on drift rather than picking the wrong file.
+    # generated_at drives keep-latest, so an unparseable cell must not reach the
+    # comparison. A blank cell stringifies to "nan"; under the old string compare
+    # "n" sorted above every digit and that row silently won its slate. The
+    # manifest is a gitignored artifact from a separate script, so fail loudly on
+    # drift rather than picking the wrong file.
+    parsed = {row.Index: _parse_iso_timestamp(row.generated_at) for row in df.itertuples()}
     malformed = [
         (row.relabeled_name, row.generated_at)
         for row in df.itertuples()
-        if not _is_iso_timestamp(row.generated_at)
+        if parsed[row.Index] is None
     ]
     if malformed:
         raise ValueError(
             f"{len(malformed)} manifest row(s) have an unusable generated_at, e.g. "
             f"{malformed[:_MAX_REPORTED]}. {_REBUILD_HINT}"
+        )
+
+    # Comparing an aware datetime against a naive one raises TypeError, so a
+    # manifest that mixes the two would crash keep-latest mid-loop. Reject it up
+    # front with the same rebuild hint as every other manifest defect.
+    aware = {dt.tzinfo is not None for dt in parsed.values()}
+    if len(aware) > 1:
+        raise ValueError(
+            f"{manifest_path} mixes timezone-aware and naive generated_at values, "
+            f"which cannot be ordered against each other. {_REBUILD_HINT}"
         )
 
     has_flag = "is_latest_for_slate" in df.columns
@@ -259,6 +276,7 @@ def load_lineups_manifest(
             generated_at=str(row.generated_at),
             n_lineups=int(row.n_lineups),
             manifest_is_latest=bool(row.is_latest_for_slate) if has_flag else False,
+            generated_dt=parsed[row.Index],
         )
         for row in df.itertuples()
     ]
@@ -277,7 +295,7 @@ def latest_lineups_by_slate(
 ) -> dict[str, LineupsFile]:
     """slate_id → the most recently generated lineups file for that slate.
 
-    Selects on `generated_at` rather than trusting the manifest's own
+    Selects on the parsed `generated_dt` rather than trusting the manifest's own
     `is_latest_for_slate`, and warns where the two disagree — recomputing is the
     safer default, but silently disagreeing with the artifact would hide drift.
     Ties break on filename so the choice is deterministic.
@@ -285,8 +303,8 @@ def latest_lineups_by_slate(
     latest: dict[str, LineupsFile] = {}
     for f in load_lineups_manifest(manifest_path, relabeled_dir):
         current = latest.get(f.slate_id)
-        if current is None or (f.generated_at, f.path.name) > (
-            current.generated_at,
+        if current is None or (f.generated_dt, f.path.name) > (
+            current.generated_dt,
             current.path.name,
         ):
             latest[f.slate_id] = f

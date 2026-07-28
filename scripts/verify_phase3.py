@@ -31,6 +31,7 @@ from nba_dfs_stats_lab.ingest.lineups import (
     latest_lineups_by_slate,
 )
 from nba_dfs_stats_lab.ingest.salary import ingest_salary
+from nba_dfs_stats_lab.ingest.schemas import SlateValidationError
 
 _failures: list[str] = []
 
@@ -155,6 +156,25 @@ def integrity_gate(conn: sqlite3.Connection, slate_id: str) -> None:
     ).fetchone()[0]
     check("every lineup has its players", mismatch == 0, f"{mismatch} lineup(s) with no slots")
 
+    # 4. ...and the reverse. `ingest_lineups` makes two `load_slate` calls in
+    #    separate transactions, so a crash between them can leave slot rows for
+    #    final_ranks the refreshed `lineups` no longer has. Such a group has its
+    #    8 slots and its players are on the slate, so checks 1-3 all pass it.
+    orphan_groups = conn.execute(
+        "SELECT COUNT(*) FROM ("
+        "  SELECT lp.final_rank FROM lineup_players lp"
+        "   WHERE lp.slate_id = ? AND NOT EXISTS ("
+        "     SELECT 1 FROM lineups l"
+        "     WHERE l.slate_id = lp.slate_id AND l.final_rank = lp.final_rank)"
+        "   GROUP BY lp.final_rank)",
+        (slate_id,),
+    ).fetchone()[0]
+    check(
+        "no slot rows without a lineup header",
+        orphan_groups == 0,
+        f"{orphan_groups} final_rank(s) in lineup_players with no lineups row",
+    )
+
     print("\n  sample lineup (final_rank 1):")
     cur = conn.execute(
         "SELECT lp.slot, lp.dk_id, sp.name, sp.team, sp.salary, sp.actual_fpts"
@@ -223,8 +243,15 @@ def main() -> int:
             return 1
         print(f"Phase 3 gate — slate {slate_id}")
 
-        salary_gate(conn, slate_id)
-        lineups_gate(conn, slate_id, available[slate_id])
+        try:
+            salary_gate(conn, slate_id)
+            lineups_gate(conn, slate_id, available[slate_id])
+        except SlateValidationError as exc:
+            # A malformed source file is an expected outcome here, not a crash:
+            # one real lineups file has a blank row and a glued-on exposure
+            # report. The report's errors are the diagnosis, so print them.
+            check("source file validates", False, str(exc))
+            return 1
         integrity_gate(conn, slate_id)
     finally:
         conn.close()

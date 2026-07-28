@@ -118,16 +118,20 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
         col_type = {
             row[1]: (row[2] or "").upper() for row in conn.execute("PRAGMA table_info(lineups)")
         }
-        stale = [c for c in ("proj_rank", "geo_rank") if col_type.get(c) != "REAL"]
+        # All three, not just the two v1 got wrong: the point is to detect drift
+        # from the live types, and a hand-edited or partially-migrated DB with
+        # own_rank INTEGER would otherwise pass here and then be stamped v2 by
+        # init_db, whose IF NOT EXISTS DDL leaves the wrong column in place.
+        stale = [c for c in ("proj_rank", "own_rank", "geo_rank") if col_type.get(c) != "REAL"]
         if stale:
             n = conn.execute("SELECT COUNT(*) FROM lineups").fetchone()[0]
             if n:
                 raise SchemaMigrationError(
-                    f"lineups holds {n} row(s) written under schema v1, where {stale} "
-                    "were INTEGER. Delete data/analytics.db and re-ingest."
+                    f"lineups holds {n} row(s) under a schema where {stale} "
+                    "are not REAL. Delete data/analytics.db and re-ingest."
                 )
             conn.execute("DROP TABLE lineups")
-            actions.append("v1->v2: recreated empty `lineups` with REAL rank columns")
+            actions.append(f"recreated empty `lineups`; {stale} were not REAL")
 
     if actions:
         conn.commit()
