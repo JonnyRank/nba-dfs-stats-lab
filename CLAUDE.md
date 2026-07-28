@@ -57,6 +57,7 @@ _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 - Normalized ints use pandas nullable `Int64`; the writer converts `NA` → SQL NULL.
 - `get_connection` opens with `uri=True` so `ATTACH 'file:…?mode=ro'` is parsed as a URI.
 - Cloud Python: the session-start hook tries the pinned 3.14.2 first and falls back to the image's system Python 3.13 (exporting `UV_PYTHON=3.13`) only if the download fails. uv fetches managed CPython from `releases.astral.sh`, so cloud environments whose Custom network allowlist includes `*.astral.sh` run the pinned 3.14.2; environments without it run the 3.13 fallback. **Both are healthy states** — don't "fix" whichever one fired. `requires-python` stays `>=3.13` so the fallback resolves; the lockfile pins identical package versions on both interpreters.
+- **`.claude/hooks/*.sh` must be mode 100755 in git.** Hooks are invoked as bare paths, so a 100644 file exits 126 "Permission denied" — a *non-blocking* SessionStart error, meaning the session runs on with no context injected and nothing obvious in the transcript. `pr-review-posture.sh` shipped that way and never fired. Fix with `git update-index --chmod=+x <path>`; `tests/test_hooks.py` pins it.
 - Cloud GitHub access is repo-scoped: a proxy 403s every GitHub path outside the session's bound repos, at every network access level. So never `uv self update` (it hits the GitHub API and misreports the 403 as a rate limit) — the hook updates uv from PyPI instead.
 
 ---
