@@ -97,7 +97,8 @@ def validate_lineups(df: pd.DataFrame) -> ValidationReport:
     if n_bad:
         examples = [
             f"row {df.index[r]} {LINEUP_SLOTS[c]}={df[LINEUP_SLOTS[c]].iloc[r]!r}"
-            for r, c in list(zip(*bad_mask.to_numpy().nonzero()))[:_MAX_REPORTED]
+            # nonzero() returns one array per axis, always the same length.
+            for r, c in list(zip(*bad_mask.to_numpy().nonzero(), strict=True))[:_MAX_REPORTED]
         ]
         report.error(f"{n_bad} slot cell(s) with no single dk_id, e.g. {examples}")
 
