@@ -31,6 +31,10 @@ class SourceSchema:
     key: str  # canonical unique-key column within a slate
     columns: tuple[ColumnSpec, ...]
     drop: tuple[str, ...] = ()  # known source columns we intentionally discard
+    # Known source columns this schema doesn't map, but which the source module
+    # consumes itself (e.g. the lineups slot columns, melted into a second
+    # table). Neither dropped nor mapped — just not "unexpected".
+    handled_elsewhere: tuple[str, ...] = ()
 
 
 @dataclass
@@ -116,9 +120,8 @@ LINEUPS_SCHEMA = SourceSchema(
         ColumnSpec("Geo_Rank", "geo_rank", "float"),
     ),
     # The slot columns are not dropped data — ingest/lineups.py validates and
-    # melts them into lineup_players. Listing them here just keeps them out of
-    # the "unexpected column" warning.
-    drop=LINEUP_SLOTS,
+    # melts them into lineup_players.
+    handled_elsewhere=LINEUP_SLOTS,
 )
 
 
@@ -145,7 +148,9 @@ def validate_frame(df: pd.DataFrame, schema: SourceSchema) -> ValidationReport:
         report.error("file has 0 data rows")
         return report
 
-    expected = {c.source for c in schema.columns} | set(schema.drop)
+    expected = (
+        {c.source for c in schema.columns} | set(schema.drop) | set(schema.handled_elsewhere)
+    )
     unexpected = [c for c in df.columns if c not in expected]
     if unexpected:
         report.warn(f"unexpected column(s) ignored: {unexpected}")

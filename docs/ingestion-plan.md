@@ -76,9 +76,9 @@ LINEUPS_DIR     = Path(r"<CONFIRM WITH JONNY>")          # ranked-lineups CSVs
 ```
 slate_id = f"{date}_classic_{slate_type}"      # e.g. 2026-02-28_classic_main
 ```
-`game_style` is constant `classic` this phase (Showdown later, its own files + tables). `slate_type` ∈ `{main, early, turbo, afternoon, night}`, lowercased.
+`game_style` is constant `classic` this phase (Showdown later, its own files + tables). `slate_type` ∈ `{main, early, turbo, afternoon, night, late}`, lowercased.
 
-> **Amended Phase 3 (2026-07-27):** `late` is a sixth valid type — `Late-2026-01-04/-01-26/-02-07.csv` are real salary files. `ingest/filenames.py` is authoritative.
+> **Amended Phase 3 (2026-07-27):** `late` was added to the set above — the originally pinned five omitted it, but `Late-2026-01-04/-01-26/-02-07.csv` are real salary files. `ingest/filenames.py` is authoritative.
 
 ### Filename → (date, slate_type)
 
@@ -96,7 +96,9 @@ lineups:      ranked-lineups-[<Type>-]<YYYY-MM-DD>[_<HHMMSS>].csv
 ```
 
 - Normalize `type`: lowercase; if the optional group is absent ⇒ `main`. Validate against the allowed set; an unknown type is a validation error.
-- **Lineups keep-latest:** a slate can have multiple lineups files differing by `_HHMMSS`. Group candidate files by `(date, type)` and select the one with the **max** `ts`. Keep the suffix in the filename; it's the version selector, not stored in the DB.
+- **Lineups keep-latest:** a slate can have multiple lineups files. Select the one with the **max** `generated_at` in `data/lineups_slate_match/manifest.csv`, keyed by `slate_id`. The `_HHMMSS` filename suffix is **not** the selector — see the amendment below.
+
+> **Amended Phase 3 (2026-07-27):** keep-latest originally read the `_HHMMSS` suffix. The relabeling side quest (see Phase 3 below and `data/lineups_slate_match/README.md`) rewrote each file's date/type from its DK-ID content but preserved the suffix, which is a *generation* time — so for 7 slates the max suffix now points at the wrong file. `latest_lineups_by_slate()` in `ingest/lineups.py` is authoritative.
 
 ### Tables — DDL (build exactly this)
 
@@ -136,9 +138,9 @@ CREATE TABLE IF NOT EXISTS lineups (
   total_projection  REAL,
   total_ownership   REAL,
   geomean_ownership REAL,
-  proj_rank         INTEGER,                -- AMENDED Phase 3: REAL (see below)
-  own_rank          REAL,                   -- read as REAL; sample had fractional values
-  geo_rank          INTEGER,                -- AMENDED Phase 3: REAL (see below)
+  proj_rank         REAL,                   -- average-rank; ties split (amended, see below)
+  own_rank          REAL,                   -- average-rank; ties split
+  geo_rank          REAL,                   -- average-rank; ties split (amended, see below)
   PRIMARY KEY (slate_id, final_rank)
 );
 
@@ -154,8 +156,8 @@ CREATE INDEX IF NOT EXISTS ix_lineup_players_slate_dk
   ON lineup_players (slate_id, dk_id);      -- exposure rollups
 ```
 
-> **Amended Phase 3 (2026-07-27):** `lineups.proj_rank` and `geo_rank` are **REAL**,
-> not INTEGER. All three ranks are average-ranks that split ties; the sample slate
+> **Amended Phase 3 (2026-07-27):** `lineups.proj_rank` and `geo_rank` are REAL above;
+> the originally pinned DDL had them INTEGER. All three ranks are average-ranks that split ties; the sample slate
 > just happened to show ties only in `own_rank`. Across the 43 reconciled slates
 > `Proj_Rank` is fractional 2266× and `Geo_Rank` 3002×. `SCHEMA_VERSION` is now 2 and
 > `db/schema.py` is authoritative.

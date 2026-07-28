@@ -23,7 +23,7 @@ from pathlib import Path
 
 from nba_dfs_stats_lab.config import SALARY_DIR
 from nba_dfs_stats_lab.db.connection import get_connection
-from nba_dfs_stats_lab.db.schema import init_db, migrate
+from nba_dfs_stats_lab.db.schema import SchemaMigrationError, init_db, migrate
 from nba_dfs_stats_lab.ingest.filenames import parse_slate_id, salary_filename
 from nba_dfs_stats_lab.ingest.lineups import (
     LineupsFile,
@@ -95,6 +95,14 @@ def lineups_gate(conn: sqlite3.Connection, slate_id: str, lineups_file: LineupsF
         "lineups ingested",
         first.lineups > 0 and first.lineup_players == first.lineups * 8,
         f"{first.lineups} lineups, {first.lineup_players} lineup_players",
+    )
+
+    # The manifest is a separate artifact from the files it indexes; if it has
+    # drifted out of sync with relabeled/, its n_lineups is the cheapest tell.
+    check(
+        "manifest n_lineups matches the file",
+        first.lineups == lineups_file.n_lineups,
+        f"manifest says {lineups_file.n_lineups}, file has {first.lineups}",
     )
 
     second = ingest_lineups(lineups_file.path, slate_id, conn)
@@ -174,11 +182,23 @@ def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     conn = get_connection()
     try:
-        for action in migrate(conn):
-            print(f"  schema migration: {action}")
-        init_db(conn)
+        try:
+            for action in migrate(conn):
+                print(f"  schema migration: {action}")
+            init_db(conn)
+        except SchemaMigrationError as exc:
+            # The exception already carries the fix ("delete analytics.db and
+            # re-ingest") — report it as a FAIL line, not a traceback.
+            check("schema migration", False, str(exc))
+            return 1
 
-        available = loadable_slates()
+        try:
+            available = loadable_slates()
+        except (FileNotFoundError, ValueError) as exc:
+            # A missing or drifted manifest — both carry the rebuild command.
+            check("lineups discovery", False, str(exc))
+            return 1
+
         if "--list" in sys.argv:
             print(f"{len(available)} slate(s) with both a salary CSV and a lineups file:")
             for slate_id in sorted(available):

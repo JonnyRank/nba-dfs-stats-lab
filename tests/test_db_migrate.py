@@ -1,5 +1,7 @@
 """The v1 -> v2 schema step (lineups rank columns INTEGER -> REAL)."""
 
+import re
+
 import pytest
 
 from nba_dfs_stats_lab.db.connection import get_connection
@@ -64,7 +66,7 @@ def test_v1_db_with_rows_refuses_rather_than_dropping(v1_conn):
         "INSERT INTO lineups (slate_id, final_rank, proj_rank) VALUES ('s1', 1, 4)"
     )
     v1_conn.commit()
-    with pytest.raises(SchemaMigrationError, match="Delete data/analytics.db"):
+    with pytest.raises(SchemaMigrationError, match=re.escape("Delete data/analytics.db")):
         migrate(v1_conn)
     assert v1_conn.execute("SELECT COUNT(*) FROM lineups").fetchone()[0] == 1
 

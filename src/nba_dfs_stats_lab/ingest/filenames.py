@@ -34,6 +34,18 @@ class ParsedFilename:
     ts: str | None = None  # lineups "_HHMMSS" suffix; None elsewhere
 
 
+def _check_date(date: str, context: str) -> None:
+    """Reject impossible dates like 2026-13-40, naming what they came from.
+
+    `date.fromisoformat` alone raises "Invalid isoformat string: '2026-2-8'",
+    which doesn't say which file or slate_id produced it.
+    """
+    try:
+        _date.fromisoformat(date)
+    except ValueError:
+        raise ValueError(f"invalid date {date!r} in {context}") from None
+
+
 def _parse(filename: str, pattern: re.Pattern, source: str) -> ParsedFilename:
     m = pattern.match(filename)
     if m is None:
@@ -48,10 +60,7 @@ def _parse(filename: str, pattern: re.Pattern, source: str) -> ParsedFilename:
         )
 
     date = m.group("date")
-    try:
-        _date.fromisoformat(date)  # reject impossible dates like 2026-13-40
-    except ValueError:
-        raise ValueError(f"invalid date {date!r} in {source} filename {filename!r}") from None
+    _check_date(date, f"{source} filename {filename!r}")
 
     ts = m.groupdict().get("ts")
     return ParsedFilename(date=date, slate_type=slate_type, ts=ts)
@@ -77,7 +86,7 @@ def parse_slate_id(slate_id: str) -> ParsedFilename:
     date, _, slate_type = parts
     if slate_type not in SLATE_TYPES:
         raise ValueError(f"unknown slate type {slate_type!r} in slate_id {slate_id!r}")
-    _date.fromisoformat(date)
+    _check_date(date, f"slate_id {slate_id!r}")
     return ParsedFilename(date=date, slate_type=slate_type)
 
 
@@ -90,7 +99,7 @@ def salary_filename(date: str, slate_type: str) -> str:
     slate_type = slate_type.lower()
     if slate_type not in SLATE_TYPES:
         raise ValueError(f"unknown slate type {slate_type!r} (allowed: {sorted(SLATE_TYPES)})")
-    _date.fromisoformat(date)
+    _check_date(date, "salary filename")
     return f"{slate_type.capitalize()}-{date}.csv"
 
 
@@ -99,5 +108,5 @@ def build_slate_id(date: str, slate_type: str) -> str:
     slate_type = slate_type.lower()
     if slate_type not in SLATE_TYPES:
         raise ValueError(f"unknown slate type {slate_type!r} (allowed: {sorted(SLATE_TYPES)})")
-    _date.fromisoformat(date)
+    _check_date(date, "slate_id")
     return f"{date}_{GAME_STYLE}_{slate_type}"

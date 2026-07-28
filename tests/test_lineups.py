@@ -207,6 +207,21 @@ def test_ingest_reload_idempotent(csv_path, conn):
     assert conn.execute("SELECT COUNT(*) FROM lineup_players").fetchone()[0] == 16
 
 
+def test_ingest_non_contiguous_final_ranks_round_trips(tmp_path, conn):
+    # Final_Rank is the in-slate key, not a row counter: nothing requires it to
+    # start at 1 or be contiguous, and both tables must agree on whatever it is.
+    p = tmp_path / "sparse.csv"
+    p.write_text(CSV_HEADER + _row(7, 100) + _row(42, 200))
+    loaded = ingest_lineups(p, SLATE_ID, conn)
+    assert tuple(loaded) == (2, 16)
+    assert [r[0] for r in conn.execute("SELECT final_rank FROM lineups ORDER BY 1")] == [7, 42]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM lineup_players lp WHERE NOT EXISTS ("
+        " SELECT 1 FROM lineups l WHERE l.slate_id = lp.slate_id"
+        " AND l.final_rank = lp.final_rank)"
+    ).fetchone()[0] == 0
+
+
 def test_ingest_invalid_writes_nothing(tmp_path, conn):
     p = tmp_path / "bad.csv"
     p.write_text(CSV_HEADER + _row(1).replace("Player 3 (103)", "Player 3"))
@@ -232,16 +247,16 @@ def manifest(tmp_path):
     rel = tmp_path / "relabeled"
     rel.mkdir()
     rows = [
-        ("ranked-lineups-2026-02-10_182319.csv", "2026-02-10_classic_main", "2026-02-10T18:23:19", 500),
-        ("ranked-lineups-2026-02-10_145546.csv", "2026-02-10_classic_main", "2026-02-11T14:55:46", 750),
-        ("ranked-lineups-2026-03-13_205856.csv", "2026-03-13_classic_night", "2026-03-13T20:58:56", 100),
+        ("ranked-lineups-2026-02-10_182319.csv", "2026-02-10_classic_main", "2026-02-10T18:23:19", 500, False),
+        ("ranked-lineups-2026-02-10_145546.csv", "2026-02-10_classic_main", "2026-02-11T14:55:46", 750, True),
+        ("ranked-lineups-2026-03-13_205856.csv", "2026-03-13_classic_night", "2026-03-13T20:58:56", 100, True),
     ]
     for name, *_ in rows:
         (rel / name).write_text(CSV_HEADER + CSV_ROWS)
     m = tmp_path / "manifest.csv"
     m.write_text(
         MANIFEST_HEADER
-        + "".join(f"{n},{n},{s},{g},False,{c}\n" for n, s, g, c in rows)
+        + "".join(f"{n},{n},{s},{g},{latest},{c}\n" for n, s, g, c, latest in rows)
     )
     return m, rel
 
@@ -292,3 +307,37 @@ def test_manifest_referencing_absent_file_raises(manifest):
     (rel / "ranked-lineups-2026-02-10_145546.csv").unlink()
     with pytest.raises(FileNotFoundError, match="missing from"):
         load_lineups_manifest(m, rel)
+
+
+def test_manifest_missing_column_raises_with_rebuild_hint(manifest):
+    # The manifest is a regenerated artifact from a separate script, so a renamed
+    # column is real drift. Without the header check, itertuples() would die with
+    # "'Pandas' object has no attribute 'generated_at'".
+    m, rel = manifest
+    m.write_text(m.read_text().replace("generated_at", "generated"))
+    with pytest.raises(ValueError, match="missing column"):
+        load_lineups_manifest(m, rel)
+
+
+def test_manifest_name_cannot_escape_relabeled_dir(manifest):
+    m, rel = manifest
+    (rel / "escaped.csv").write_text(CSV_HEADER + CSV_ROWS)
+    m.write_text(m.read_text().replace("ranked-lineups-2026-03-13_205856.csv,", "../escaped.csv,", 1))
+    files = load_lineups_manifest(m, rel)
+    assert all(f.path.parent == rel for f in files)
+
+
+def test_keep_latest_warns_when_manifest_flag_disagrees(manifest, caplog):
+    m, rel = manifest
+    m.write_text(m.read_text().replace("2026-02-11T14:55:46,True", "2026-02-11T14:55:46,False"))
+    with caplog.at_level("WARNING"):
+        latest = latest_lineups_by_slate(m, rel)
+    # generated_at still decides; the disagreement is surfaced, not obeyed.
+    assert latest["2026-02-10_classic_main"].path.name == "ranked-lineups-2026-02-10_145546.csv"
+    assert "is_latest_for_slate" in caplog.text
+
+
+def test_keep_latest_silent_when_manifest_agrees(manifest, caplog):
+    with caplog.at_level("WARNING"):
+        latest_lineups_by_slate(*manifest)
+    assert caplog.text == ""
