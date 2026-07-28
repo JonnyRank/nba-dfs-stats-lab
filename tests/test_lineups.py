@@ -118,6 +118,20 @@ def test_repeated_player_in_lineup_fails(tmp_path):
     assert any("repeated player" in e for e in report.errors)
 
 
+def test_repeated_player_without_final_rank_reports_not_raises(tmp_path):
+    # Regression: the repeated-player message indexed Final_Rank, so a file
+    # missing that column raised KeyError instead of returning a report — which
+    # would kill the Phase 4 orchestrator's per-slate SlateValidationError catch.
+    p = tmp_path / "norank.csv"
+    header = CSV_HEADER.replace("Final_Rank,", "")
+    row = _row(1).replace("Player 3 (103)", "Player 0 (100)").split(",", 1)[1]
+    p.write_text(header + row)
+    report = validate_lineups(read_lineups(p))
+    assert not report.ok
+    assert any("Final_Rank" in e and "missing" in e for e in report.errors)
+    assert any("repeated player" in e for e in report.errors)
+
+
 def test_duplicate_final_rank_fails(tmp_path):
     p = tmp_path / "duprank.csv"
     p.write_text(CSV_HEADER + _row(1, 100) + _row(1, 200))
@@ -255,6 +269,22 @@ def test_find_lineups_file(manifest):
 def test_missing_manifest_raises_with_rebuild_hint(tmp_path):
     with pytest.raises(FileNotFoundError, match="match_lineups_to_slates"):
         load_lineups_manifest(tmp_path / "nope.csv", tmp_path)
+
+
+def test_manifest_with_blank_generated_at_raises(manifest):
+    # Regression: a blank cell stringifies to "nan", and "n" sorts above every
+    # digit — that row would silently win keep-latest for its slate.
+    m, rel = manifest
+    m.write_text(m.read_text().replace("2026-02-11T14:55:46", ""))
+    with pytest.raises(ValueError, match="unusable generated_at"):
+        load_lineups_manifest(m, rel)
+
+
+def test_manifest_with_garbled_generated_at_raises(manifest):
+    m, rel = manifest
+    m.write_text(m.read_text().replace("2026-02-11T14:55:46", "yesterday"))
+    with pytest.raises(ValueError, match="unusable generated_at"):
+        load_lineups_manifest(m, rel)
 
 
 def test_manifest_referencing_absent_file_raises(manifest):

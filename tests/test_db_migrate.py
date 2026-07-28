@@ -73,3 +73,21 @@ def test_migrate_is_idempotent(v1_conn):
     migrate(v1_conn)
     init_db(v1_conn)
     assert migrate(v1_conn) == []
+
+
+def test_init_db_migrates_rather_than_stamping_over_v1(v1_conn):
+    # Regression: init_db's DDL is all IF NOT EXISTS, so on a v1 DB it changes
+    # nothing — but it stamps user_version. Stamping before migrating would mark
+    # an un-upgraded schema as current and disable migrate() forever.
+    init_db(v1_conn)
+    assert _rank_types(v1_conn)["proj_rank"] == "REAL"
+    assert v1_conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_migrate_detects_drift_even_when_version_says_current(v1_conn):
+    # A v1 schema mis-stamped as v2 (what verify_gates.py's init_db used to do)
+    # must still be detected — migrate reads the live column types, not the stamp.
+    v1_conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    v1_conn.commit()
+    actions = migrate(v1_conn)
+    assert len(actions) == 1 and "v1->v2" in actions[0]

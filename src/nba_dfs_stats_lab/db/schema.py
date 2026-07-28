@@ -76,7 +76,13 @@ TABLES = ("dk_crosswalk", "slate_players", "projections", "lineups", "lineup_pla
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create all tables and indexes; stamp the schema version."""
+    """Migrate if needed, then create all tables and indexes; stamp the version.
+
+    `migrate` runs first because every DDL statement below is IF NOT EXISTS: on
+    an existing DB `init_db` changes nothing but still stamps `user_version`, so
+    stamping before migrating would mark an un-upgraded schema as current.
+    """
+    migrate(conn)
     conn.executescript(DDL)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
@@ -91,9 +97,13 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
 
     Deliberately minimal — `analytics.db` is a rebuildable artifact, so the
     fallback for anything this can't handle is "delete it and re-ingest".
-    Callers should run `init_db` afterwards.
+    `init_db` calls this itself; call it directly only to surface the actions.
+
+    Each step detects drift from the **live schema**, not from `user_version`.
+    The stamp is not trustworthy on its own: `init_db`'s DDL is all IF NOT
+    EXISTS, so any caller that ran it against an old DB (e.g. verify_gates.py)
+    stamped the current version onto a schema it never changed.
     """
-    version = conn.execute("PRAGMA user_version").fetchone()[0]
     actions: list[str] = []
     existing = {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -104,15 +114,20 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
     # v1 -> v2: lineups.proj_rank / geo_rank were declared INTEGER. SQLite can't
     # change a column type in place, and the table is only written by Phase 3,
     # so recreating it empty is the whole migration.
-    if version < 2 and "lineups" in existing:
-        n = conn.execute("SELECT COUNT(*) FROM lineups").fetchone()[0]
-        if n:
-            raise SchemaMigrationError(
-                f"lineups holds {n} row(s) written under schema v1, where proj_rank "
-                "and geo_rank were INTEGER. Delete data/analytics.db and re-ingest."
-            )
-        conn.execute("DROP TABLE lineups")
-        actions.append("v1->v2: recreated empty `lineups` with REAL rank columns")
+    if "lineups" in existing:
+        col_type = {
+            row[1]: (row[2] or "").upper() for row in conn.execute("PRAGMA table_info(lineups)")
+        }
+        stale = [c for c in ("proj_rank", "geo_rank") if col_type.get(c) != "REAL"]
+        if stale:
+            n = conn.execute("SELECT COUNT(*) FROM lineups").fetchone()[0]
+            if n:
+                raise SchemaMigrationError(
+                    f"lineups holds {n} row(s) written under schema v1, where {stale} "
+                    "were INTEGER. Delete data/analytics.db and re-ingest."
+                )
+            conn.execute("DROP TABLE lineups")
+            actions.append("v1->v2: recreated empty `lineups` with REAL rank columns")
 
     if actions:
         conn.commit()

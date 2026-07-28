@@ -22,6 +22,7 @@ import logging
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -106,11 +107,14 @@ def validate_lineups(df: pd.DataFrame) -> ValidationReport:
         n_distinct = ids.nunique(axis=1)
         dupes = n_distinct[n_distinct != len(LINEUP_SLOTS)]
         if len(dupes) > 0:
-            ranks = df.loc[dupes.index, "Final_Rank"].head(_MAX_REPORTED).tolist()
-            report.error(
-                f"{len(dupes)} lineup(s) with a repeated player, "
-                f"e.g. Final_Rank {ranks}"
-            )
+            # Fall back to row positions when Final_Rank is absent — that is
+            # already an error from validate_frame, and this must still return a
+            # report rather than raising KeyError past the caller.
+            if "Final_Rank" in df.columns:
+                where = f"Final_Rank {df.loc[dupes.index, 'Final_Rank'].head(_MAX_REPORTED).tolist()}"
+            else:
+                where = f"row {dupes.index[:_MAX_REPORTED].tolist()}"
+            report.error(f"{len(dupes)} lineup(s) with a repeated player, e.g. {where}")
 
     return report
 
@@ -178,6 +182,17 @@ def ingest_lineups(path: Path, slate_id: str, conn: sqlite3.Connection) -> Lineu
 # --- Discovery (keep-latest by true generation time) ---------------------------
 
 
+def _is_iso_timestamp(value: object) -> bool:
+    """True if `value` is a string SQLite/Python would read as an ISO timestamp."""
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class LineupsFile:
     slate_id: str
@@ -199,6 +214,23 @@ def load_lineups_manifest(
             "    uv run python scripts/match_lineups_to_slates.py"
         )
     df = pd.read_csv(manifest_path)
+
+    # generated_at is compared as a string for keep-latest, which is only valid
+    # for well-formed ISO-8601. A blank cell would stringify to "nan", and "n"
+    # sorts above every digit — that row would silently win keep-latest for its
+    # slate. The manifest is a gitignored artifact from a separate script, so
+    # fail loudly on drift rather than picking the wrong file.
+    malformed = [
+        (row.relabeled_name, row.generated_at)
+        for row in df.itertuples()
+        if not _is_iso_timestamp(row.generated_at)
+    ]
+    if malformed:
+        raise ValueError(
+            f"{len(malformed)} manifest row(s) have an unusable generated_at, e.g. "
+            f"{malformed[:_MAX_REPORTED]}. Re-run scripts/match_lineups_to_slates.py."
+        )
+
     files = [
         LineupsFile(
             slate_id=row.slate_id,
@@ -243,5 +275,12 @@ def find_lineups_file(
     manifest_path: Path = LINEUPS_MANIFEST,
     relabeled_dir: Path = LINEUPS_RELABELED_DIR,
 ) -> LineupsFile | None:
-    """The keep-latest lineups file for one slate, or None if it has none."""
+    """The keep-latest lineups file for one slate, or None if it has none.
+
+    Convenience for one-off lookups — it re-reads the manifest and re-stats every
+    file on each call. Phase 4's backfill loops hundreds of slates against a
+    Google Drive-backed path, so the orchestrator should call
+    `latest_lineups_by_slate()` **once** and index into the returned dict rather
+    than calling this per slate.
+    """
     return latest_lineups_by_slate(manifest_path, relabeled_dir).get(slate_id)

@@ -186,6 +186,16 @@ def main() -> int:
                 print(f"  {slate_id}  {f.n_lineups:>5} lineups  {f.path.name}")
             return 0
 
+        if not available:
+            print(
+                "No slate has both a salary CSV and a lineups file.\n"
+                f"  salary dir: {SALARY_DIR}\n"
+                "Check that the G:\\ drive is mounted and that "
+                "data/lineups_slate_match/ was built against the same salary dir "
+                "(rebuild: uv run python scripts/match_lineups_to_slates.py)."
+            )
+            return 1
+
         slate_id = args[0] if args else max(available)
         if slate_id not in available:
             print(f"slate {slate_id!r} has no salary CSV and/or no lineups file.")
