@@ -126,3 +126,45 @@ def test_own_rank_drift_with_rows_refuses_rather_than_dropping(tmp_path):
         migrate(conn)
     assert conn.execute("SELECT COUNT(*) FROM lineups").fetchone()[0] == 1
     conn.close()
+
+
+V1_LINEUP_PLAYERS_DDL = """
+CREATE TABLE lineup_players (
+  slate_id   TEXT    NOT NULL,
+  final_rank INTEGER NOT NULL,
+  slot       TEXT    NOT NULL,
+  dk_id      INTEGER NOT NULL,
+  PRIMARY KEY (slate_id, final_rank, slot)
+);
+"""
+
+
+def test_stale_lineups_with_populated_lineup_players_refuses(tmp_path):
+    # ingest_lineups writes the two tables in separate transactions, so a crash
+    # between them leaves slot rows with `lineups` empty. Dropping `lineups`
+    # here would strand those rows permanently and stamp the DB v2 carrying
+    # orphans, so refuse on either table holding data — not just `lineups`.
+    conn = get_connection(tmp_path / "half.db")
+    conn.executescript(V1_LINEUPS_DDL + V1_LINEUP_PLAYERS_DDL)
+    conn.execute("INSERT INTO lineup_players VALUES ('s1', 1, 'PG', 100)")
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+
+    with pytest.raises(SchemaMigrationError, match="lineup_players holds 1 row"):
+        migrate(conn)
+    # Nothing was dropped or stamped on the way out.
+    assert conn.execute("SELECT COUNT(*) FROM lineup_players").fetchone()[0] == 1
+    assert _rank_types(conn)["proj_rank"] == "INTEGER"
+    conn.close()
+
+
+def test_stale_lineups_with_both_tables_empty_still_migrates(tmp_path):
+    conn = get_connection(tmp_path / "empty_both.db")
+    conn.executescript(V1_LINEUPS_DDL + V1_LINEUP_PLAYERS_DDL)
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+
+    assert len(migrate(conn)) == 1
+    init_db(conn)
+    assert _rank_types(conn)["proj_rank"] == "REAL"
+    conn.close()

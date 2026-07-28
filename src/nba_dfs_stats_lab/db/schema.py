@@ -124,11 +124,24 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
         # init_db, whose IF NOT EXISTS DDL leaves the wrong column in place.
         stale = [c for c in ("proj_rank", "own_rank", "geo_rank") if col_type.get(c) != "REAL"]
         if stale:
-            n = conn.execute("SELECT COUNT(*) FROM lineups").fetchone()[0]
-            if n:
+            # Both tables, not just `lineups`. ingest_lineups writes them in two
+            # separate transactions, so a crash between the calls can leave slot
+            # rows behind with `lineups` empty. Dropping `lineups` then would
+            # strand those rows permanently — nothing else deletes them, and the
+            # DB would be stamped v2 carrying orphans. Refuse instead: this
+            # module never destroys data it wasn't asked to, and analytics.db is
+            # rebuildable by design.
+            held = {
+                table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("lineups", "lineup_players")
+                if table in existing
+            }
+            populated = {table: n for table, n in held.items() if n}
+            if populated:
+                detail = ", ".join(f"{table} holds {n} row(s)" for table, n in populated.items())
                 raise SchemaMigrationError(
-                    f"lineups holds {n} row(s) under a schema where {stale} "
-                    "are not REAL. Delete data/analytics.db and re-ingest."
+                    f"{detail} under a schema where {stale} are not REAL. "
+                    "Delete data/analytics.db and re-ingest."
                 )
             conn.execute("DROP TABLE lineups")
             actions.append(f"recreated empty `lineups`; {stale} were not REAL")
