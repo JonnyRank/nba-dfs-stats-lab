@@ -12,8 +12,8 @@ Ingest DraftKings DFS data into a local SQLite analytics DB (`data/analytics.db`
 
 _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 
-**Current phase:** Phase 3 — salary + lineups (not started)
-**Last gate cleared:** Phases 1 + 2 — `scripts/verify_gates.py` all-PASS on the Windows machine, 2026-07-26
+**Current phase:** Phase 4 — orchestrator + backfill (not started)
+**Last gate cleared:** Phase 3 — `scripts/verify_phase3.py` all-PASS on the Windows machine, 2026-07-27
 
 **Done**
 - Phase 0: `config.py` populated; `SALARY_DIR`/`LINEUPS_DIR` confirmed; `data/` created.
@@ -24,6 +24,11 @@ _Update at every gate before `/clear`: done / next / decisions. Keep it short._
   - all five tables created in `data/analytics.db`; ops DB attached with 6 tables visible; probe write rejected with `attempt to write a readonly database` (proves `mode=ro`).
   - `NBA-Projs-2026-05-18.csv` → `2026-05-18_classic_main`, 72 rows; re-ingest wrote 72 with total unchanged at 72 (idempotent). `minutes`/`fppm`/`proj_pts`/`proj_own` all populated.
 - `data/analytics.db` now exists and holds exactly that one projections slate. It is gitignored and rebuildable — delete it and re-run the gate any time.
+- Phase 3: `ingest/salary.py` + `ingest/lineups.py` in the same four-method shape; `SALARY_SCHEMA` / `LINEUPS_SCHEMA` added to `ingest/schemas.py`; manifest-driven lineups discovery (`load_lineups_manifest` / `latest_lineups_by_slate` / `find_lineups_file`); `parse_slate_id` + `salary_filename` inverses in `filenames.py`; `db/schema.py` gained `migrate()`. 109 pytest tests, ruff clean.
+- **Phase 3 gate cleared** (2026-07-27, `uv run python scripts/verify_phase3.py`, all PASS on three slates):
+  - `2026-05-18_classic_main` — 72 players, 50 lineups / 400 lineup_players; `2026-03-13_classic_night` — 107 players, 2484/19872; `2026-04-02_classic_main` — 216 players, 3000/24000.
+  - All three: re-ingest idempotent on both tables, 8 players per lineup everywhere, **0 orphan rostered players**, every lineup header has its slot rows.
+  - `--list` shows **43 slates** with both a salary CSV and a lineups file. All 7 keep-latest picks that `_HHMMSS` would get wrong match the README's corrected table.
 
 **Side quest (done): lineups filename reconciliation**
 - The optimizer named `ranked-lineups-*` files from run time, not slate date. `scripts/match_lineups_to_slates.py` matches each file to its true slate by DK ID set intersection (DK ID blocks are disjoint across slates — verified, 0 collisions across 409 slates). 219/226 matched at 100% coverage; 26 dates and 5 slate types corrected. Outputs + full write-up in `data/lineups_slate_match/README.md` (gitignored); corrected copies in `relabeled/`.
@@ -31,9 +36,14 @@ _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 - 7 files are unmatchable: no slate CSV exists for Feb 13–22, 2026. Parked in `unmatched/`.
 
 **Next**
-- Phase 3: salary + lineups mirroring the projections four-method shape. Ship `scripts/verify_phase3.py` in the same PR (see the gate rule below), and read the two lineups notes in the side-quest section above before designing the lineups loader.
+- Phase 4: `ingest/orchestrator.py` — `ingest_day()`, cross-source discovery, `--dry-run`, then the full backfill. Ship `scripts/verify_phase4.py` in the same PR. Discovery already exists for lineups (`latest_lineups_by_slate`) and for salary paths (`salary_filename`); projections discovery is the missing piece. Expect ~409 salary slates, 49 projections files, 43 slates with lineups — so most slates will load salary only, which is fine and should be reported, not treated as an error.
 
 **Decisions / notes**
+- **`late` added to `SLATE_TYPES`** (2026-07-27, confirmed with Jonny). Three real salary files use it — `Late-2026-01-04/-01-26/-02-07` — and two also have projections + lineups. The originally pinned five-type set was drawn from an incomplete sample.
+- **`lineups.proj_rank` and `geo_rank` changed INTEGER → REAL; `SCHEMA_VERSION` 1 → 2.** All three rank columns are average-ranks that split ties; the pinned DDL only marked `own_rank` REAL because the sample slate happened to show ties only there. Across the 43 reconciled slates `Proj_Rank` is fractional 2266× and `Geo_Rank` 3002×. `db/schema.py:migrate()` handles v1→v2 by recreating the (necessarily empty) `lineups` table, and refuses rather than dropping data if it isn't empty.
+- **Lineups ingest reads `data/lineups_slate_match/relabeled/`, never `LINEUPS_DIR`.** `LINEUPS_DIR` holds the original misnamed files. New config constants: `LINEUPS_MATCH_DIR`, `LINEUPS_RELABELED_DIR`, `LINEUPS_MANIFEST`. Keep-latest selects on the manifest's `generated_at`; a missing manifest raises with the `scripts/match_lineups_to_slates.py` rebuild command.
+- `ingest_lineups` returns a `LineupsLoad(lineups, lineup_players)` named tuple and makes two `load_slate` calls — separate transactions, so a crash between them can leave `lineups` fresh and `lineup_players` stale. Re-running the slate repairs it; nothing duplicates within a table.
+- Data facts confirmed by probing all 409 salary + 219 lineups files: one salary header variant, no duplicate `DFS ID` anywhere, `Team`/`Opponent` null on 36 rows (warning, nullable), `Actual_FPTs` populated on every row. One lineups file (`ranked-lineups-2026-03-12_161516.csv`) has a blank row plus a glued-on exposure report — validation rejects it cleanly, and it isn't the keep-latest for its slate anyway.
 - Phase 1+2 shipped in one PR: Phase 1 code was never pushed from the earlier session, and Phase 2 depends on it.
 - **Every ✋ gate needs a runnable check Jonny can execute** — a `scripts/verify_*.py` with PASS/FAIL output (see `scripts/verify_gates.py`) or exact paste-able commands in the gate report. Jonny reads code but doesn't write it; a gate described only in prose ("confirm X works") is not actionable. Phase 3+ sessions: ship the gate script in the same PR as the phase code.
 - **`PROJECTIONS_DIR` moved** from `CSV-Exports\projections` to `NBA-DFS-25-26\NBA-25-26-Projs-CSVs` (2026-07-26). The old directory's 302 files were unusable: names carried a `_HH-MM-SS` suffix the pinned regex rejects, and the files only had `ID,Projection,Own_Proj` — no `Minutes`/`FPPM`, both required by `PROJECTIONS_SCHEMA`. The new directory's 49 files parse and validate 49/49 clean with zero warnings. Note `docs/ingestion-plan.md` still shows the old path in its Phase 0 snippet; config.py is authoritative.
@@ -79,7 +89,7 @@ slate_id = f"{date}_classic_{slate_type}"
 ```
 
 `game_style` is always `classic` this phase (Showdown is out of scope).
-`slate_type` ∈ `{main, early, turbo, afternoon, night}` — always lowercase.
+`slate_type` ∈ `{main, early, turbo, afternoon, night, late}` — always lowercase. (`late` added Phase 3; see Decisions.)
 
 ---
 
@@ -97,9 +107,9 @@ lineups:     ranked-lineups-[<Type>-]<YYYY-MM-DD>[_<HHMMSS>].csv
 ```
 
 - Type group absent → `main` (default).
-- Type must be in `{main, early, turbo, afternoon, night}`; unknown type is a validation error.
-- `Main` is **explicit** in salary filenames; implicit (absent) in projections and lineups.
-- **Lineups keep-latest:** when multiple files share `(date, type)`, select the one with the highest `_HHMMSS` suffix.
+- Type must be in `{main, early, turbo, afternoon, night, late}`; unknown type is a validation error.
+- `Main` is **explicit** in salary filenames; implicit (absent) in projections and lineups. `salary_filename(date, type)` is the inverse; `parse_slate_id(slate_id)` inverts `build_slate_id`.
+- **Lineups keep-latest: do NOT use `_HHMMSS`.** Select on `manifest.csv` → `generated_at` via `latest_lineups_by_slate()`. The suffix is a *generation* time, and after the relabeling side quest it points at the wrong file for 7 slates.
 
 ---
 
@@ -109,7 +119,7 @@ lineups:     ranked-lineups-[<Type>-]<YYYY-MM-DD>[_<HHMMSS>].csv
 |---|---|---|
 | `slate_players` | `(slate_id, dk_id)` | salary CSV |
 | `projections` | `(slate_id, dk_id)` | projections CSV |
-| `lineups` | `(slate_id, final_rank)` | lineups CSV (header rows) |
+| `lineups` | `(slate_id, final_rank)` | lineups CSV (header rows) — `relabeled/`, keep-latest by manifest |
 | `lineup_players` | `(slate_id, final_rank, slot)` | lineups CSV (melted slots) |
 | `dk_crosswalk` | `dk_id` | built last, from ops DB match |
 
@@ -119,7 +129,7 @@ lineups:     ranked-lineups-[<Type>-]<YYYY-MM-DD>[_<HHMMSS>].csv
 
 **Projections → `projections`:** `ID`→`dk_id` (int) · `Minutes`→`minutes` · `FPPM`→`fppm` · `Projection`→`proj_pts` · `Own_Proj`→`proj_own`. Drop `Player`/`Team`/`Opponent`.
 
-**Lineups → `lineups`:** `Final_Rank`→`final_rank` · `Lineup_Score`→`lineup_score` · `Total_Projection`→`total_projection` · `Total_Ownership`→`total_ownership` · `Geomean_Ownership`→`geomean_ownership` · `Proj_Rank`→`proj_rank` · `Own_Rank`→`own_rank` (REAL) · `Geo_Rank`→`geo_rank`.
+**Lineups → `lineups`:** `Final_Rank`→`final_rank` · `Lineup_Score`→`lineup_score` · `Total_Projection`→`total_projection` · `Total_Ownership`→`total_ownership` · `Geomean_Ownership`→`geomean_ownership` · `Proj_Rank`→`proj_rank` · `Own_Rank`→`own_rank` · `Geo_Rank`→`geo_rank`. **All three ranks are REAL** — they're average-ranks and split ties.
 
 **Lineups → `lineup_players`:** melt slots `PG SG SF PF C G F UTIL`; extract `dk_id` from `"Player Name (12345678)"` via `r"\((\d+)\)"`.
 

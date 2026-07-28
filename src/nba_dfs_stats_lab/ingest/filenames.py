@@ -14,7 +14,10 @@ import re
 from dataclasses import dataclass
 from datetime import date as _date
 
-SLATE_TYPES = frozenset({"main", "early", "turbo", "afternoon", "night"})
+# `late` was not in the originally pinned set; three real salary files use it
+# (Late-2026-01-04/-01-26/-02-07), two of which also have projections and
+# lineups. Confirmed with Jonny 2026-07-27 — see CLAUDE.md Status.
+SLATE_TYPES = frozenset({"main", "early", "turbo", "afternoon", "night", "late"})
 GAME_STYLE = "classic"  # constant this phase; Showdown is a later phase
 
 SALARY_RE = re.compile(r"^(?P<type>[A-Za-z]+)-(?P<date>\d{4}-\d{2}-\d{2})\.csv$")
@@ -64,6 +67,31 @@ def parse_projections_filename(filename: str) -> ParsedFilename:
 
 def parse_lineups_filename(filename: str) -> ParsedFilename:
     return _parse(filename, LINEUPS_RE, "lineups")
+
+
+def parse_slate_id(slate_id: str) -> ParsedFilename:
+    """Inverse of build_slate_id: '2026-02-28_classic_main' -> date + type."""
+    parts = slate_id.split("_")
+    if len(parts) != 3 or parts[1] != GAME_STYLE:
+        raise ValueError(f"malformed slate_id {slate_id!r} (expected '<date>_{GAME_STYLE}_<type>')")
+    date, _, slate_type = parts
+    if slate_type not in SLATE_TYPES:
+        raise ValueError(f"unknown slate type {slate_type!r} in slate_id {slate_id!r}")
+    _date.fromisoformat(date)
+    return ParsedFilename(date=date, slate_type=slate_type)
+
+
+def salary_filename(date: str, slate_type: str) -> str:
+    """Inverse of parse_salary_filename: '2026-05-18', 'main' -> 'Main-2026-05-18.csv'.
+
+    Salary filenames spell the type with a leading capital and always include
+    it — even for Main, unlike the other two sources.
+    """
+    slate_type = slate_type.lower()
+    if slate_type not in SLATE_TYPES:
+        raise ValueError(f"unknown slate type {slate_type!r} (allowed: {sorted(SLATE_TYPES)})")
+    _date.fromisoformat(date)
+    return f"{slate_type.capitalize()}-{date}.csv"
 
 
 def build_slate_id(date: str, slate_type: str) -> str:
