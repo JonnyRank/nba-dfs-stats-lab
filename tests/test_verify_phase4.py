@@ -13,7 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from conftest import DUPLICATE_DK_ID_SALARY, MAIN_SLATE, rediscover
+from conftest import (
+    DUPLICATE_DK_ID_SALARY,
+    MAIN_SLATE,
+    OFF_SLATE_GAME_SALARY,
+    rediscover,
+)
 from nba_dfs_stats_lab.db.connection import get_connection
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "verify_phase4.py"
@@ -226,6 +231,26 @@ def test_backfill_gate_reports_warnings(verify, gate, sources, monkeypatch, caps
     out = capsys.readouterr().out
     assert "validation warning(s):" in out
     assert "Team: 1 missing value(s)" in out
+
+
+def test_backfill_gate_rolls_up_off_slate_games(
+    verify, gate, sources, monkeypatch, capsys
+):
+    # The per-file warnings scroll past during a 412-slate backfill; the rollup
+    # is the standing list the ops-reconciliation pass works from. A note, not a
+    # check — the rows are supposed to be there.
+    (sources["salary_dir"] / "Main-2026-05-18.csv").write_text(OFF_SLATE_GAME_SALARY)
+    rebind(verify, monkeypatch, sources)
+    assert verify.main(["--backfill"]) == 0
+    out = capsys.readouterr().out
+    assert "[note] off-slate games (actual_fpts all 0 on both sides)" in out
+    assert "1 game(s), 4 rows" in out
+    assert f"{MAIN_SLATE}  LAC vs POR  4 players" in out
+
+
+def test_rollup_is_silent_when_every_game_was_played(verify, gate, capsys):
+    assert verify.main(["--backfill"]) == 0
+    assert "off-slate games" not in capsys.readouterr().out
 
 
 def test_sample_covers_every_coverage_combination(verify, discovery):

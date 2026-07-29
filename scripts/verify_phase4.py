@@ -343,6 +343,47 @@ def integrity_gate(conn: sqlite3.Connection) -> None:
             f"{sorted(no_salary_at_all)}",
         )
 
+    zero_game_rollup(conn)
+
+
+def zero_game_rollup(conn: sqlite3.Connection) -> None:
+    """List every off-slate game now sitting in the DB with actual_fpts = 0.
+
+    `validate_salary` already warns per file, but those warnings scroll past
+    during a 412-slate backfill. This is the standing list the ops-reconciliation
+    pass will work from, queried straight from the loaded rows.
+
+    A note, not a check: these are a fact about the source data, not a defect in
+    the code, and the rows are supposed to be here — see the docstring on
+    `ingest.salary.check_zero_scored_games`.
+    """
+    # A team is zeroed when it has rows and none of them is NULL or non-zero.
+    # Same rule as the per-file check; NULL actuals mean "not yet played", which
+    # is a different state and must not be swept in here.
+    zeroed = conn.execute(
+        "SELECT slate_id, team, MIN(opp), COUNT(*) FROM slate_players"
+        " WHERE team IS NOT NULL AND team <> ''"
+        " GROUP BY slate_id, team"
+        " HAVING SUM(CASE WHEN actual_fpts IS NULL OR actual_fpts <> 0 THEN 1 ELSE 0 END) = 0"
+    ).fetchall()
+    if not zeroed:
+        return
+
+    sides = {(slate_id, team) for slate_id, team, _, _ in zeroed}
+    games: dict[tuple[str, str, str], int] = {}
+    for slate_id, team, opp, n in zeroed:
+        if opp and (slate_id, opp) in sides:  # both sides zeroed => off-slate game
+            pair = (team, opp) if team < opp else (opp, team)
+            games[(slate_id, *pair)] = games.get((slate_id, *pair), 0) + n
+
+    rows = sum(games.values())
+    note(
+        "off-slate games (actual_fpts all 0 on both sides)",
+        f"{len(games)} game(s), {rows} rows — for the ops-reconciliation pass",
+    )
+    for (slate_id, a, b), n in sorted(games.items()):
+        print(f"         {slate_id}  {a} vs {b}  {n} players")
+
 
 def idempotency_gate(conn: sqlite3.Connection, discovery: Discovery) -> None:
     """Re-run the richest slate through the orchestrator; nothing may change."""

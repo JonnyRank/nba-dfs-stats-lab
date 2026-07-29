@@ -1,5 +1,8 @@
 """Salary source: validate/normalize contract and end-to-end ingest."""
 
+import io
+
+import pandas as pd
 import pytest
 
 from nba_dfs_stats_lab.db.connection import get_connection
@@ -127,6 +130,109 @@ def test_ingest_unplayed_slate_writes_null_actuals(tmp_path, conn):
     p.write_text(CSV_HEADER + '"1","A","PG","X","Y","5000",\n')
     assert ingest_salary(p, SLATE_ID, conn) == 1
     assert conn.execute("SELECT actual_fpts FROM slate_players").fetchone()[0] is None
+
+
+# --- off-slate games (every player on both sides at 0) ------------------------
+#
+# The generic contract cannot catch these: the cells hold `0`, not blank, and
+# across all 409 real files there is not one blank Actual_FPTs. See the docstring
+# on `check_zero_scored_games`.
+
+
+def _player(dk_id: int, team: str, opp: str, fpts: str) -> str:
+    return f"{dk_id},Player {dk_id},PG/G/UTIL,{team},{opp},5000,{fpts}\n"
+
+
+def _game(start: int, home: str, away: str, fpts: list[str]) -> str:
+    """Two rows per side, one line each, with the given actuals in order."""
+    return "".join(
+        _player(start + i, home if i < 2 else away, away if i < 2 else home, fpts[i])
+        for i in range(4)
+    )
+
+
+PLAYED_GAME = _game(200, "BOS", "NYK", ["42.5", "0", "31.25", "18"])
+OFF_SLATE_GAME = _game(300, "LAC", "POR", ["0", "0", "0", "0"])
+
+
+def zero_game_warnings(csv_text: str) -> list[str]:
+    report = validate_salary(pd.read_csv(io.StringIO(csv_text)))
+    assert report.ok, report.errors  # never blocks the load
+    return [w for w in report.warnings if "scored 0" in w or "every team" in w]
+
+
+def test_both_sides_at_zero_warns():
+    warnings = zero_game_warnings(CSV_HEADER + PLAYED_GAME + OFF_SLATE_GAME)
+    assert len(warnings) == 1
+    assert "1 game(s)" in warnings[0]
+    assert "LAC vs POR (4 players)" in warnings[0]
+
+
+def test_a_real_zero_alongside_real_scores_does_not_warn():
+    # BOS has a 0 in PLAYED_GAME — a DNP or a garbage-time line, and common:
+    # the unaffected teams on 2026-02-02 carry 6 to 9 each.
+    assert zero_game_warnings(CSV_HEADER + PLAYED_GAME) == []
+
+
+def test_one_side_at_zero_does_not_warn():
+    # A blowout where one team's rostered players all sat is implausible but
+    # possible; both sides scoring nothing is not. Only the pair is the signal.
+    lopsided = _game(400, "MEM", "PHI", ["0", "0", "44.5", "22.25"])
+    assert zero_game_warnings(CSV_HEADER + lopsided) == []
+
+
+def test_two_off_slate_games_are_both_reported():
+    second = _game(500, "DAL", "MIL", ["0", "0", "0", "0"])
+    warnings = zero_game_warnings(CSV_HEADER + PLAYED_GAME + OFF_SLATE_GAME + second)
+    assert "2 game(s)" in warnings[0]
+    assert "DAL vs MIL" in warnings[0] and "LAC vs POR" in warnings[0]
+
+
+def test_whole_slate_at_zero_reports_once():
+    # Early-2025-12-07 is in exactly this state — 68 rows, no results recorded.
+    # Reported as one slate-level fact rather than a line per game.
+    warnings = zero_game_warnings(CSV_HEADER + OFF_SLATE_GAME)
+    assert len(warnings) == 1
+    assert "every team on the slate scored 0 across all 4 rows" in warnings[0]
+
+
+def test_unplayed_slate_is_not_an_off_slate_game():
+    # All actuals NULL means "not played yet", a different state entirely. NaN
+    # never equals 0, so it must not be swept in here — validate_frame already
+    # warns about the missing values.
+    unplayed = _game(600, "LAC", "POR", ["", "", "", ""])
+    report = validate_salary(pd.read_csv(io.StringIO(CSV_HEADER + unplayed)))
+    assert report.ok
+    assert not any("scored 0" in w or "every team" in w for w in report.warnings)
+    assert any("Actual_FPTs" in w for w in report.warnings)
+
+
+def test_blank_team_rows_do_not_form_a_phantom_team():
+    # 36 rows of one real file had no Team/Opponent. They can't be attributed to
+    # a game, so they must not group into a "" team that then reads as zeroed.
+    blanks = _player(700, "", "", "0") + _player(701, "", "", "0")
+    assert zero_game_warnings(CSV_HEADER + PLAYED_GAME + blanks) == []
+
+
+def test_missing_team_column_does_not_crash_the_check():
+    # validate_frame already errors on the missing column; the check must return
+    # rather than KeyError past it.
+    no_team = '"DFS ID","Name","Position","Opponent","Salary","Actual_FPTs"\n"1","A","PG","NYK","5000","0"\n'
+    report = validate_salary(pd.read_csv(io.StringIO(no_team)))
+    assert not report.ok
+    assert any("Team" in e for e in report.errors)
+
+
+def test_off_slate_rows_still_load(tmp_path, conn):
+    # A warning, not an error: surface, don't drop. The rows are otherwise valid
+    # and the exclusion decision belongs to the ops-reconciliation pass.
+    p = tmp_path / "Main-2026-02-02.csv"
+    p.write_text(CSV_HEADER + PLAYED_GAME + OFF_SLATE_GAME)
+    assert ingest_salary(p, SLATE_ID, conn) == 8
+    zeros = conn.execute(
+        "SELECT COUNT(*) FROM slate_players WHERE team IN ('LAC','POR')"
+    ).fetchone()[0]
+    assert zeros == 4
 
 
 def test_ingest_invalid_writes_nothing(tmp_path, conn):

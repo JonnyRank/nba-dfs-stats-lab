@@ -51,6 +51,16 @@ def salary_rows(null_team_ids: tuple[int, ...] = ()) -> str:
 # Valid, but with a null Team/Opponent on one row — loads with a warning.
 NULL_TEAM_SALARY = SALARY_HEADER + salary_rows(null_team_ids=(SLOT_IDS[0],))
 
+# The 8 rostered players, plus an off-slate game: both sides at exactly 0.
+# Loads with a warning (see ingest.salary.check_zero_scored_games). The extra
+# players are deliberately not in any lineup, which is what the real files look
+# like — the game wasn't on the slate, so nothing could roster it.
+OFF_SLATE_GAME_SALARY = SALARY_HEADER + salary_rows() + "".join(
+    f"{200 + i},Bench {i},PG/G/UTIL,{'LAC' if i < 2 else 'POR'},"
+    f"{'POR' if i < 2 else 'LAC'},5000,0\n"
+    for i in range(4)
+)
+
 # Both at once: a null Team/Opponent (warning) and a duplicate dk_id (error).
 # The warning must survive onto the INVALID outcome, not be lost with the file.
 WARNS_AND_FAILS_SALARY = (

@@ -21,6 +21,10 @@ nba-dfs-stats-lab.code-workspace
 *.db
 data/
 
+# Local working notes — parked plans and findings that aren't tracked specs.
+# docs/ingestion-plan.md is the tracked ground-truth doc; these are scratch.
+docs/*.local.md
+
 # MCP Server config files
 .devdbrc
 

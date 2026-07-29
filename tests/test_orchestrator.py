@@ -29,6 +29,7 @@ from conftest import (
     MAIN_SLATE,
     MANIFEST_HEADER,
     NULL_TEAM_SALARY,
+    OFF_SLATE_GAME_SALARY,
     PROJ_HEADER,
     WARNS_AND_FAILS_SALARY,
     projection_rows,
@@ -334,6 +335,29 @@ def test_write_path_reports_warnings_not_just_the_dry_run(sources, conn):
         warnings = result.outcome("salary").warnings
         assert any("Team: 1 missing value(s)" in w for w in warnings)
         assert any("Opponent: 1 missing value(s)" in w for w in warnings)
+
+
+def test_off_slate_game_warns_on_both_paths_and_still_loads(sources, conn):
+    """The 0-not-NULL case reaches the run summary and does not block the write.
+
+    Four real games are in this state. Nothing about them is invalid — they load,
+    and the warning is what marks them for the ops-reconciliation pass.
+    """
+    (sources["salary_dir"] / "Main-2026-05-18.csv").write_text(OFF_SLATE_GAME_SALARY)
+    d = rediscover(sources)
+
+    dry = ingest_slate(d.slates[MAIN_SLATE], conn, dry_run=True)
+    wrote = ingest_slate(d.slates[MAIN_SLATE], conn)
+
+    assert wrote.ok and wrote.outcome("salary").status is Status.LOADED
+    for result in (dry, wrote):
+        assert any(
+            "LAC vs POR (4 players)" in w for w in result.outcome("salary").warnings
+        )
+    # Surface, don't drop: all 12 rows are in the table, off-slate four included.
+    assert conn.execute("SELECT COUNT(*) FROM slate_players").fetchone()[0] == 12
+    # ...and the lineups still load, because the 8 rostered players are all there.
+    assert wrote.outcome("lineups").status is Status.LOADED
 
 
 def test_backfill_summary_collects_warnings_across_slates(sources, conn):
