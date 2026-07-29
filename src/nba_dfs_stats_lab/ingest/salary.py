@@ -65,9 +65,9 @@ def _sole_opponent(team: pd.Series, opp: pd.Series, name: str) -> str | None:
 def check_zero_scored_games(df: pd.DataFrame, report: ValidationReport) -> None:
     """Warn where every rostered player on BOTH sides of a game scored exactly 0.
 
-    Four real games are in this state (2025-10-26 LAC/POR, 2025-10-28 GSW/LAC,
-    2026-01-25 DAL/MIL, 2026-02-02 CHA/NOP), plus the whole of Early-2025-12-07 —
-    208 of 51,971 rows. They are games that tipped off outside the slate's
+    Six real games are in this state (2025-10-26 LAC/POR, 2025-10-28 GSW/LAC,
+    2026-01-25 DAL/MIL, 2026-02-02 CHA/NOP, and both games of Early-2025-12-07) —
+    209 of 51,971 rows. They are games that tipped off outside the slate's
     window (an odd-hour start on a day when everything else began later), so
     their players were never actually rosterable in that contest and no actuals
     were ever recorded against it.
