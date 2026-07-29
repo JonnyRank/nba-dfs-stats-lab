@@ -181,6 +181,34 @@ def test_one_side_at_zero_does_not_warn():
     assert zero_game_warnings(CSV_HEADER + lopsided) == []
 
 
+def test_a_third_zeroed_team_does_not_invent_a_game():
+    """`other` being zeroed is not enough — the pairing has to reciprocate.
+
+    LAC/POR are genuinely off-slate. SAC is also all-zero and names POR, but
+    POR names LAC. Without a reciprocity check "POR vs SAC" is reported as a
+    game that never existed, and POR's roster is counted into two games at once.
+    """
+    stray = _player(600, "SAC", "POR", "0") + _player(601, "SAC", "POR", "0")
+    warnings = zero_game_warnings(CSV_HEADER + PLAYED_GAME + OFF_SLATE_GAME + stray)
+    assert len(warnings) == 1
+    assert "1 game(s)" in warnings[0]
+    assert "LAC vs POR (4 players)" in warnings[0]
+    assert "SAC" not in warnings[0]
+
+
+def test_a_team_with_two_opponents_is_not_rolled_up():
+    # Every row for a team carries the same Opponent on a real slate, so two
+    # means the file disagrees with itself. Counting its roster into both games
+    # would report more players than the file has rows.
+    contradictory = (
+        _player(700, "LAL", "GSW", "0")
+        + _player(701, "LAL", "SAS", "0")
+        + _player(702, "GSW", "LAL", "0")
+        + _player(703, "SAS", "LAL", "0")
+    )
+    assert zero_game_warnings(CSV_HEADER + PLAYED_GAME + contradictory) == []
+
+
 def test_two_off_slate_games_are_both_reported():
     second = _game(500, "DAL", "MIL", ["0", "0", "0", "0"])
     warnings = zero_game_warnings(CSV_HEADER + PLAYED_GAME + OFF_SLATE_GAME + second)

@@ -369,10 +369,15 @@ def zero_game_rollup(conn: sqlite3.Connection) -> None:
     if not zeroed:
         return
 
-    sides = {(slate_id, team) for slate_id, team, _, _ in zeroed}
+    # The pairing must reciprocate: knowing `opp` is *also* zeroed is not enough,
+    # because it says nothing about who `opp` played. If A-B are off-slate and a
+    # third zeroed team C names B, "B vs C" would be reported as a game that
+    # never existed — and this list is what the ops-reconciliation pass works
+    # from, so a phantom entry sends someone chasing a game that isn't there.
+    zeroed_opp = {(slate_id, team): opp for slate_id, team, opp, _ in zeroed}
     games: dict[tuple[str, str, str], int] = {}
     for slate_id, team, opp, n in zeroed:
-        if opp and (slate_id, opp) in sides:  # both sides zeroed => off-slate game
+        if opp and zeroed_opp.get((slate_id, opp)) == team:
             pair = (team, opp) if team < opp else (opp, team)
             games[(slate_id, *pair)] = games.get((slate_id, *pair), 0) + n
 

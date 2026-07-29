@@ -51,6 +51,17 @@ def _zeroed_teams(team: pd.Series, is_zero: pd.Series) -> set[str]:
     }
 
 
+def _sole_opponent(team: pd.Series, opp: pd.Series, name: str) -> str | None:
+    """The one team `name` played, or None if that isn't unambiguous.
+
+    Every row for a team on a classic slate carries the same `Opponent`, so more
+    than one means the file disagrees with itself. Returning None there keeps the
+    team out of the rollup rather than counting its roster into several games.
+    """
+    others = opp[team == name].dropna().unique()
+    return others[0] if len(others) == 1 else None
+
+
 def check_zero_scored_games(df: pd.DataFrame, report: ValidationReport) -> None:
     """Warn where every rostered player on BOTH sides of a game scored exactly 0.
 
@@ -97,13 +108,17 @@ def check_zero_scored_games(df: pd.DataFrame, report: ValidationReport) -> None:
         )
         return
 
+    # The pairing must reciprocate. `other` merely being zeroed says nothing
+    # about who `other` played: if A-B are off-slate and a third zeroed team C
+    # names B, "B vs C" would be reported as a game that never existed, and B's
+    # roster would be counted into two games at once.
+    opponent = {name: _sole_opponent(team, opp, name) for name in zeroed}
     games: dict[tuple[str, str], int] = {}
     for name in zeroed:
-        rostered = team == name
-        for other in opp[rostered].dropna().unique():
-            if other in zeroed:
-                pair = (name, other) if name < other else (other, name)
-                games[pair] = games.get(pair, 0) + int(rostered.sum())
+        other = opponent[name]
+        if other is not None and other in zeroed and opponent.get(other) == name:
+            pair = (name, other) if name < other else (other, name)
+            games[pair] = games.get(pair, 0) + int((team == name).sum())
     if not games:
         # One side zeroed and the other not: a real (if lopsided) result, or a
         # team whose opponent isn't on this slate. Not the off-slate signature.

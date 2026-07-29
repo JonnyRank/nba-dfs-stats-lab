@@ -248,6 +248,32 @@ def test_backfill_gate_rolls_up_off_slate_games(
     assert f"{MAIN_SLATE}  LAC vs POR  4 players" in out
 
 
+def test_rollup_requires_the_pairing_to_reciprocate(verify, gate, capsys):
+    """A zeroed team that names someone who names a third team is not a game.
+
+    The rollup drives the ops-reconciliation pass, so a phantom entry sends
+    someone chasing a game that never existed — and double-counts the roster of
+    the team caught in the middle.
+    """
+    from nba_dfs_stats_lab.db.schema import init_db
+
+    conn = get_connection(gate)
+    init_db(conn)
+    conn.executemany(
+        "INSERT INTO slate_players (slate_id, dk_id, name, team, opp, actual_fpts)"
+        " VALUES (?, ?, 'p', ?, ?, 0)",
+        [("s", 1, "A", "B"), ("s", 2, "B", "A"), ("s", 3, "C", "B")],
+    )
+    conn.commit()
+    verify.zero_game_rollup(conn)
+    conn.close()
+
+    out = capsys.readouterr().out
+    assert "1 game(s), 2 rows" in out  # not 3 rows across two games
+    assert "A vs B" in out
+    assert "C" not in out
+
+
 def test_rollup_is_silent_when_every_game_was_played(verify, gate, capsys):
     assert verify.main(["--backfill"]) == 0
     assert "off-slate games" not in capsys.readouterr().out
