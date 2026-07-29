@@ -7,6 +7,8 @@ data forces: partial coverage is normal, one bad file must not abort a backfill,
 and a dry run must not touch the DB.
 """
 
+import sqlite3
+
 import pytest
 
 from nba_dfs_stats_lab.db.connection import get_connection
@@ -26,6 +28,7 @@ from conftest import (
     DUPLICATE_DK_ID_SALARY,
     MAIN_SLATE,
     MANIFEST_HEADER,
+    NULL_TEAM_SALARY,
     PROJ_HEADER,
     projection_rows,
     rediscover,
@@ -81,6 +84,21 @@ def test_discovery_skips_a_second_file_claiming_the_same_slate(sources):
     skipped = dict(d.skipped_files)
     assert "NBA-Projs-Main-2026-05-18.csv" in skipped
     assert "already taken by" in skipped["NBA-Projs-Main-2026-05-18.csv"]
+
+
+def test_discovery_skips_an_unparseable_manifest_slate_id(sources):
+    # Filename-derived ids are built by build_slate_id, so only a hand-edited
+    # manifest can carry one parse_slate_id rejects. Treated like a bad filename
+    # rather than taking the whole inventory down with it.
+    sources["manifest"].write_text(
+        MANIFEST_HEADER
+        + f"{sources['lineups_csv'].name},orig.csv,2026-05-18-main,2026-05-18T16:51:50,True,2\n"
+    )
+    d = rediscover(sources)
+    skipped = dict(d.skipped_files)
+    assert "2026-05-18-main" in skipped
+    assert "match_lineups_to_slates.py" in skipped["2026-05-18-main"]
+    assert MAIN_SLATE in d.slates  # the salary + projections files still resolved
 
 
 def test_discovery_rejects_a_missing_source_directory(tmp_path):
@@ -295,6 +313,81 @@ def test_backfill_accepts_a_slate_id_discovery_never_saw(discovery, conn):
     assert all(o.status is Status.ABSENT for o in summary.results[0].outcomes)
 
 
+# --- validation warnings ------------------------------------------------------
+
+
+def test_write_path_reports_warnings_not_just_the_dry_run(sources, conn):
+    """The headline dry-run result is a warning count; a write run must match it.
+
+    `ingest_*` logs its warnings and drops them, so without the `on_report` hook
+    a real backfill could only report warnings it never saw.
+    """
+    (sources["salary_dir"] / "Main-2026-05-18.csv").write_text(NULL_TEAM_SALARY)
+    d = rediscover(sources)
+
+    dry = ingest_slate(d.slates[MAIN_SLATE], conn, dry_run=True)
+    wrote = ingest_slate(d.slates[MAIN_SLATE], conn)
+
+    assert wrote.outcome("salary").status is Status.LOADED
+    for result in (dry, wrote):
+        warnings = result.outcome("salary").warnings
+        assert any("Team: 1 missing value(s)" in w for w in warnings)
+        assert any("Opponent: 1 missing value(s)" in w for w in warnings)
+
+
+def test_backfill_summary_collects_warnings_across_slates(sources, conn):
+    (sources["salary_dir"] / "Main-2026-05-18.csv").write_text(NULL_TEAM_SALARY)
+    summary = backfill(conn, discovery=rediscover(sources))
+    assert not summary.failures
+    slate_ids = {slate_id for slate_id, _, _ in summary.warnings}
+    assert slate_ids == {MAIN_SLATE}
+    assert all(source == "salary" for _, source, _ in summary.warnings)
+
+
+def test_write_path_warns_when_the_manifest_count_disagrees_with_the_file(sources, conn):
+    sources["manifest"].write_text(
+        MANIFEST_HEADER
+        + f"{sources['lineups_csv'].name},orig.csv,{MAIN_SLATE},2026-05-18T16:51:50,True,99\n"
+    )
+    result = ingest_slate(rediscover(sources).slates[MAIN_SLATE], conn)
+    lineups = result.outcome("lineups")
+    assert lineups.status is Status.LOADED
+    assert any("manifest says 99" in w for w in lineups.warnings)
+
+
+# --- lineups gating -----------------------------------------------------------
+
+
+def test_lineups_skipped_when_salary_fails_even_with_stale_rows(sources, conn):
+    """Rows a previous run wrote must not stand in for this run's salary step.
+
+    Otherwise a slate whose salary CSV has just gone bad would load its new
+    lineups against the *old* player set, with nothing recording that it did.
+    """
+    ingest_slate(rediscover(sources).slates[MAIN_SLATE], conn)
+    assert conn.execute("SELECT COUNT(*) FROM slate_players").fetchone()[0] == 8
+
+    (sources["salary_dir"] / "Main-2026-05-18.csv").write_text(DUPLICATE_DK_ID_SALARY)
+    result = ingest_slate(rediscover(sources).slates[MAIN_SLATE], conn)
+
+    assert result.outcome("salary").status is Status.INVALID
+    lineups = result.outcome("lineups")
+    assert lineups.status is Status.SKIPPED
+    assert "salary is invalid" in lineups.detail
+
+
+def test_a_db_error_is_an_error_not_a_crash(discovery, tmp_path):
+    """The `sqlite3.Error` arm of `_SLATE_ERRORS` — a DB that has no tables."""
+    conn = get_connection(tmp_path / "no-schema.db")  # init_db never run
+    try:
+        result = ingest_slate(discovery.slates[MAIN_SLATE], conn)
+    finally:
+        conn.close()
+    salary = result.outcome("salary")
+    assert salary.status is Status.ERROR
+    assert "no such table" in salary.detail
+
+
 # --- SlateSources -------------------------------------------------------------
 
 
@@ -336,7 +429,7 @@ def _empty(db_path) -> bool:
     conn = get_connection(db_path)
     try:
         return conn.execute("SELECT COUNT(*) FROM slate_players").fetchone()[0] == 0
-    except Exception:
+    except sqlite3.Error:  # table never created — nothing was written
         return True
     finally:
         conn.close()
@@ -371,6 +464,56 @@ def test_cli_exits_nonzero_when_a_slate_fails(cli, sources, monkeypatch, capsys)
     monkeypatch.setattr(orchestrator, "discover_slates", lambda: d)
     assert main(["--all"]) == 1
     assert "1 failure(s):" in capsys.readouterr().out
+
+
+def test_cli_rejects_a_malformed_slate_id_without_a_traceback(cli, capsys):
+    # A typo is the likeliest way this CLI gets driven wrong; it used to reach
+    # parse_slate_id inside backfill() and traceback.
+    assert main(["--slate", "2026-05-18-main"]) == 2
+    err = capsys.readouterr().err
+    assert "invalid --slate value(s):" in err
+    assert "2026-05-18-main" in err
+    assert _empty(cli)
+
+
+def test_cli_accepts_a_slate_id_that_is_merely_unknown(cli, capsys):
+    # Unknown but well-formed: every source ABSENT is the honest answer.
+    assert main(["--slate", "2026-04-01_classic_turbo"]) == 0
+    assert "have no files at all" in capsys.readouterr().out
+
+
+def test_cli_limit_restricts_the_run(cli, capsys):
+    assert main(["--limit", "1"]) == 0
+    assert "backfill: 1 slate(s)" in capsys.readouterr().out
+
+
+def test_cli_limit_larger_than_discovery_still_needs_all(cli, capsys):
+    # `--limit 500` against 4 slates restricts nothing, so it must not be a way
+    # past the --all guard.
+    assert main(["--limit", "500"]) == 2
+    assert "Refusing to write all 4 slates without --all" in capsys.readouterr().err
+    assert _empty(cli)
+
+
+def test_cli_warns_about_unresolved_filenames_outside_list(cli, sources, monkeypatch, capsys):
+    from nba_dfs_stats_lab.ingest import orchestrator
+
+    (sources["salary_dir"] / "NotASlate.csv").write_text("nope\n")
+    d = rediscover(sources)
+    monkeypatch.setattr(orchestrator, "discover_slates", lambda: d)
+    assert main(["--dry-run"]) == 0
+    assert "1 file(s) not resolved to a slate" in capsys.readouterr().err
+
+
+def test_cli_prints_a_warning_tally(cli, sources, monkeypatch, capsys):
+    from nba_dfs_stats_lab.ingest import orchestrator
+
+    (sources["salary_dir"] / "Main-2026-05-18.csv").write_text(NULL_TEAM_SALARY)
+    monkeypatch.setattr(orchestrator, "discover_slates", lambda: rediscover(sources))
+    assert main(["--all"]) == 0
+    out = capsys.readouterr().out
+    assert "2 validation warning(s):" in out
+    assert "no failures." in out
 
 
 def test_cli_reports_discovery_failure_without_a_traceback(monkeypatch, capsys):

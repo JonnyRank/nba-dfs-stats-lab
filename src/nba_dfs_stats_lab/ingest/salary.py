@@ -8,6 +8,7 @@ here beyond the schema declaration.
 
 import logging
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -37,16 +38,28 @@ def normalize_salary(df: pd.DataFrame, slate_id: str) -> pd.DataFrame:
     return normalize_frame(df, SALARY_SCHEMA, slate_id)
 
 
-def ingest_salary(path: Path, slate_id: str, conn: sqlite3.Connection) -> int:
+def ingest_salary(
+    path: Path,
+    slate_id: str,
+    conn: sqlite3.Connection,
+    on_report: Callable[[ValidationReport], None] | None = None,
+) -> int:
     """read → validate → (stop if errors) → normalize → load_slate.
 
     Returns rows written. On validation errors nothing is written and
     SlateValidationError (carrying the full report) is raised; warnings are
     logged but don't block.
+
+    `on_report` receives the `ValidationReport` before the write. Logging alone
+    discards the warnings, so a caller that wants to *count* them (the
+    orchestrator's run summary) has no other way to see them on this path —
+    the exception only carries the report when validation fails.
     """
     path = Path(path)
     df = read_salary(path)
     report = validate_salary(df)
+    if on_report is not None:
+        on_report(report)
     for warning in report.warnings:
         logger.warning("%s [%s]: %s", slate_id, path.name, warning)
     if not report.ok:

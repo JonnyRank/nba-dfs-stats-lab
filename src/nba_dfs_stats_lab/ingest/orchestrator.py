@@ -61,7 +61,11 @@ from nba_dfs_stats_lab.ingest.projections import (
     validate_projections,
 )
 from nba_dfs_stats_lab.ingest.salary import ingest_salary, read_salary, validate_salary
-from nba_dfs_stats_lab.ingest.schemas import SlateValidationError, ValidationReport
+from nba_dfs_stats_lab.ingest.schemas import (
+    LINEUP_SLOTS,
+    SlateValidationError,
+    ValidationReport,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +78,8 @@ SOURCES = ("salary", "projections", "lineups")
 _SLATE_ERRORS = (OSError, ValueError, sqlite3.Error)
 
 _MAX_REPORTED = 5  # cap examples in messages; the count carries the scale
+
+_MANIFEST_HINT = "rebuild it with: uv run python scripts/match_lineups_to_slates.py"
 
 
 class Status(StrEnum):
@@ -152,6 +158,17 @@ class BackfillSummary:
     @property
     def failures(self) -> list[tuple[str, SourceOutcome]]:
         return [(r.slate_id, o) for r in self.results for o in r.failures]
+
+    @property
+    def warnings(self) -> list[tuple[str, str, str]]:
+        """(slate_id, source, warning) for every validation warning in the run.
+
+        Symmetric with `failures` and populated on both paths, so a write run can
+        report the same warning tally a dry run does.
+        """
+        return [
+            (r.slate_id, o.source, w) for r in self.results for o in r.outcomes for w in o.warnings
+        ]
 
     def status_counts(self) -> dict[str, Counter]:
         """source -> Counter of Status over every slate in the run."""
@@ -259,7 +276,17 @@ def discover_slates(
 
     slates: dict[str, SlateSources] = {}
     for slate_id in sorted(set(salary) | set(projections) | set(lineups)):
-        parsed = parse_slate_id(slate_id)
+        try:
+            parsed = parse_slate_id(slate_id)
+        except ValueError as exc:
+            # Only reachable for a manifest-derived id — the filename-derived ones
+            # were built by `build_slate_id`. Recorded rather than raised, so one
+            # hand-edited manifest row doesn't take the whole inventory with it,
+            # and carrying the same rebuild hint every other manifest defect does.
+            skipped.append(
+                (slate_id, f"{exc} — from the lineups manifest; {_MANIFEST_HINT}")
+            )
+            continue
         slates[slate_id] = SlateSources(
             slate_id=slate_id,
             date=parsed.date,
@@ -289,6 +316,17 @@ def _dry_run_outcome(
     return SourceOutcome(source, Status.VALID, rows=rows, warnings=warnings)
 
 
+def _warning_collector() -> tuple[list[str], Callable[[ValidationReport], None]]:
+    """Sink for the `on_report` hook the three `ingest_*` functions accept.
+
+    The write path validates inside `ingest_*`, which logs its warnings and
+    drops them. Without this the run summary could only report warnings for dry
+    runs, so `--all` would say nothing about a file that loaded *with* warnings.
+    """
+    collected: list[str] = []
+    return collected, lambda report: collected.extend(report.warnings)
+
+
 def _run_flat_source(
     source: str,
     path: Path | None,
@@ -297,7 +335,7 @@ def _run_flat_source(
     dry_run: bool,
     read: Callable[[Path], pd.DataFrame],
     validate: Callable[[pd.DataFrame], ValidationReport],
-    ingest: Callable[[Path, str, sqlite3.Connection], int],
+    ingest: Callable[..., int],
     table: str,
 ) -> SourceOutcome:
     """One file -> one table (salary, projections). Never raises for one slate."""
@@ -306,7 +344,11 @@ def _run_flat_source(
     try:
         if dry_run:
             return _dry_run_outcome(source, validate(read(path)), table)
-        return SourceOutcome(source, Status.LOADED, rows={table: ingest(path, slate_id, conn)})
+        warnings, on_report = _warning_collector()
+        rows = ingest(path, slate_id, conn, on_report=on_report)
+        return SourceOutcome(
+            source, Status.LOADED, rows={table: rows}, warnings=tuple(warnings)
+        )
     except SlateValidationError as exc:
         return SourceOutcome(source, Status.INVALID, detail=str(exc))
     except _SLATE_ERRORS as exc:
@@ -328,9 +370,25 @@ def _run_lineups(
     skipped (not failed) when the slate has no players: either its salary CSV is
     missing, or the salary step just failed. All 43 reconciled lineups slates do
     have a salary CSV, so in practice this only fires on a real defect.
+
+    The write path checks *both* the salary outcome and the row count. Rows
+    alone would let a previous run's `slate_players` satisfy the gate while this
+    run's salary step was INVALID, loading the new lineups against a stale player
+    set and recording nothing about it.
     """
     if lineups_file is None:
         return SourceOutcome("lineups", Status.ABSENT)
+
+    # Checked before the row count, and on both paths: a salary step that failed
+    # leaves whatever slate_players held before, which must not stand in for the
+    # player set this run was supposed to write.
+    if salary_outcome.status.is_failure:
+        return SourceOutcome(
+            "lineups",
+            Status.SKIPPED,
+            detail=f"salary is {salary_outcome.status} — this run wrote no slate_players "
+            "for the slate",
+        )
 
     if dry_run:
         # No DB state to consult in a dry run, so gate on the salary step: if it
@@ -357,7 +415,10 @@ def _run_lineups(
             df = read_lineups(lineups_file.path)
             report = validate_lineups(df)
             outcome = _dry_run_outcome(
-                "lineups", report, "lineups", {"lineup_players": report.row_count * 8}
+                "lineups",
+                report,
+                "lineups",
+                {"lineup_players": report.row_count * len(LINEUP_SLOTS)},
             )
             # The manifest is a separate artifact from the files it indexes; a
             # count mismatch means it drifted out of sync with relabeled/.
@@ -366,11 +427,17 @@ def _run_lineups(
                     f"manifest says {lineups_file.n_lineups} lineups, file has {report.row_count}",
                 )
             return outcome
-        load = ingest_lineups(lineups_file.path, slate_id, conn)
+        warnings, on_report = _warning_collector()
+        load = ingest_lineups(lineups_file.path, slate_id, conn, on_report=on_report)
+        if load.lineups != lineups_file.n_lineups:
+            warnings.append(
+                f"manifest says {lineups_file.n_lineups} lineups, file has {load.lineups}"
+            )
         return SourceOutcome(
             "lineups",
             Status.LOADED,
             rows={"lineups": load.lineups, "lineup_players": load.lineup_players},
+            warnings=tuple(warnings),
         )
     except SlateValidationError as exc:
         return SourceOutcome("lineups", Status.INVALID, detail=str(exc))
@@ -410,6 +477,20 @@ def ingest_slate(
     return result
 
 
+def _sources_for(discovery: Discovery, slate_id: str) -> SlateSources:
+    """Discovery's entry for `slate_id`, or an empty one.
+
+    Asking for a slate no source has is a legitimate query, not a failure —
+    `ingest_slate` reports every source ABSENT, which is the honest answer.
+    Raises `ValueError` if `slate_id` is malformed rather than merely unknown.
+    """
+    sources = discovery.slates.get(slate_id)
+    if sources is not None:
+        return sources
+    parsed = parse_slate_id(slate_id)
+    return SlateSources(slate_id=slate_id, date=parsed.date, slate_type=parsed.slate_type)
+
+
 def ingest_day(
     date: str,
     slate_type: str,
@@ -426,12 +507,7 @@ def ingest_day(
     slate_id = build_slate_id(date, slate_type)
     if discovery is None:
         discovery = discover_slates()
-    sources = discovery.slates.get(slate_id)
-    if sources is None:
-        # Not a failure: asking for a slate no source has is a legitimate query.
-        parsed = parse_slate_id(slate_id)
-        sources = SlateSources(slate_id=slate_id, date=parsed.date, slate_type=parsed.slate_type)
-    return ingest_slate(sources, conn, dry_run=dry_run)
+    return ingest_slate(_sources_for(discovery, slate_id), conn, dry_run=dry_run)
 
 
 # --- Backfill -----------------------------------------------------------------
@@ -448,6 +524,10 @@ def backfill(
 
     One slate's bad file never stops the run — it lands in the summary's
     failures. `on_result` is called after each slate for progress output.
+
+    Raises `ValueError` if a `slate_ids` entry is malformed (as opposed to merely
+    undiscovered). `main()` validates `--slate` up front so the CLI reports that
+    rather than tracebacking.
     """
     if discovery is None:
         discovery = discover_slates()
@@ -455,13 +535,7 @@ def backfill(
 
     summary = BackfillSummary(dry_run=dry_run)
     for slate_id in wanted:
-        sources = discovery.slates.get(slate_id)
-        if sources is None:
-            parsed = parse_slate_id(slate_id)
-            sources = SlateSources(
-                slate_id=slate_id, date=parsed.date, slate_type=parsed.slate_type
-            )
-        result = ingest_slate(sources, conn, dry_run=dry_run)
+        result = ingest_slate(_sources_for(discovery, slate_id), conn, dry_run=dry_run)
         summary.results.append(result)
         if on_result is not None:
             on_result(result)
@@ -518,17 +592,27 @@ def _print_summary(summary: BackfillSummary) -> None:
     for table in ("slate_players", "projections", "lineups", "lineup_players"):
         print(f"    {table:<16} {totals.get(table, 0):>8,}")
 
+    warnings = summary.warnings
+    if warnings:
+        print(f"\n  {len(warnings)} validation warning(s):")
+        for slate_id, source, warning in warnings[:_MAX_REPORTED]:
+            print(f"    {slate_id} [{source}] {warning}")
+        if len(warnings) > _MAX_REPORTED:
+            print(f"    ... and {len(warnings) - _MAX_REPORTED} more")
+    else:
+        print("\n  no validation warnings.")
+
     failures = summary.failures
     if failures:
         print(f"\n  {len(failures)} failure(s):")
         for slate_id, outcome in failures:
             print(f"    {slate_id} [{outcome.source}] {outcome.status}: {outcome.detail}")
     else:
-        print("\n  no failures.")
+        print("  no failures.")
 
 
-def _select_slates(discovery: Discovery, args: argparse.Namespace) -> list[str] | None:
-    """Apply --slate / --date / --limit. None means 'all discovered'."""
+def _select_slates(discovery: Discovery, args: argparse.Namespace) -> list[str]:
+    """Apply --slate / --date / --limit to the discovered slate ids."""
     selected = list(discovery.slates)
     if args.slate:
         unknown = [s for s in args.slate if s not in discovery.slates]
@@ -590,8 +674,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_inventory(discovery)
         return 0
 
+    if discovery.skipped_files:
+        # --list is not the only route a person takes to a run, and a file whose
+        # name drifted out of convention is invisible data loss if nothing says so.
+        print(
+            f"warning: {len(discovery.skipped_files)} file(s) not resolved to a slate "
+            "and will not be ingested — run --list for detail",
+            file=sys.stderr,
+        )
+
+    malformed = []
+    for slate_id in args.slate or ():
+        try:
+            parse_slate_id(slate_id)
+        except ValueError as exc:
+            malformed.append(str(exc))
+    if malformed:
+        # A typo in a hand-typed slate id is the likeliest way this CLI is driven
+        # wrong. Unknown-but-parseable ids are fine (every source reports ABSENT);
+        # unparseable ones would only reach parse_slate_id inside backfill().
+        print("invalid --slate value(s):", file=sys.stderr)
+        for message in malformed:
+            print(f"  {message}", file=sys.stderr)
+        return 2
+
     selected = _select_slates(discovery, args)
-    restricted = bool(args.slate or args.date or args.limit is not None)
+    # "A restriction implies intent" — but only if it actually restricts.
+    # `--limit 500` against 412 slates selects every one of them, so taking the
+    # flag's mere presence as intent would let it walk past the --all guard.
+    restricted = bool(args.slate or args.date) or (
+        args.limit is not None and args.limit < len(discovery.slates)
+    )
     if not restricted and not args.all and not args.dry_run:
         print(
             f"Refusing to write all {len(discovery.slates)} slates without --all.\n"

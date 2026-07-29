@@ -34,7 +34,6 @@ def gate(verify, monkeypatch, discovery, tmp_path):
     db_path = tmp_path / "gate.db"
     monkeypatch.setattr(verify, "discover_slates", lambda: discovery)
     monkeypatch.setattr(verify, "get_connection", lambda: get_connection(db_path))
-    verify._failures.clear()
     return db_path
 
 
@@ -171,6 +170,62 @@ def test_unmigratable_db_is_a_fail_line(verify, gate, capsys):
     out = capsys.readouterr().out
     assert "[FAIL] schema migration" in out
     assert "Delete data/analytics.db" in out
+
+
+def test_main_clears_failures_between_runs(verify, gate, sources, monkeypatch, capsys):
+    """`_failures` is module-level, so `main()` has to reset it itself.
+
+    Without this a second call in the same process inherits the first run's
+    failures — skipping the backfill and returning 1 on a clean run.
+    """
+    (sources["salary_dir"] / "Bogus-2026-05-19.csv").write_text("x\n")
+    rebind(verify, monkeypatch, sources)
+    assert verify.main([]) == 1
+
+    (sources["salary_dir"] / "Bogus-2026-05-19.csv").unlink()
+    rebind(verify, monkeypatch, sources)
+    assert verify.main([]) == 0
+    assert "All gate checks passed." in capsys.readouterr().out
+
+
+def test_sample_below_one_is_rejected(verify, gate):
+    # --sample 0 samples nothing, so every dry-run check would pass vacuously —
+    # including "the sample actually read files" (0 == 0).
+    with pytest.raises(SystemExit) as exc:
+        verify.main(["--sample", "0"])
+    assert exc.value.code == 2
+
+
+def test_backfill_gate_names_stale_slates(verify, gate, sources, monkeypatch, capsys):
+    """A row-count mismatch must name what disagrees, not just dump the counts."""
+    # A slate loaded from an older manifest that discovery no longer finds.
+    conn = get_connection(gate)
+    from nba_dfs_stats_lab.db.schema import init_db
+
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO slate_players (slate_id, dk_id, name) VALUES (?, ?, ?)",
+        ("2026-01-01_classic_main", 999, "Ghost"),
+    )
+    conn.commit()
+    conn.close()
+
+    assert verify.main(["--backfill"]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] every table holds exactly what the backfill wrote" in out
+    assert "2026-01-01_classic_main" in out
+    assert "not in discovery" in out
+
+
+def test_backfill_gate_reports_warnings(verify, gate, sources, monkeypatch, capsys):
+    from conftest import NULL_TEAM_SALARY
+
+    (sources["salary_dir"] / "Main-2026-05-18.csv").write_text(NULL_TEAM_SALARY)
+    rebind(verify, monkeypatch, sources)
+    assert verify.main(["--backfill"]) == 0
+    out = capsys.readouterr().out
+    assert "validation warning(s):" in out
+    assert "Team: 1 missing value(s)" in out
 
 
 def test_sample_covers_every_coverage_combination(verify, discovery):

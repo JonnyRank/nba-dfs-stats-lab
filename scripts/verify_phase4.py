@@ -25,6 +25,11 @@ the Phase 3 integrity invariants across the *whole* DB rather than one slate:
   - every lineup header has its slot rows, and no slot rows lack a header
   - re-running one slate changes no row count (idempotency at orchestrator level)
 
+**Precondition for `--backfill`:** the check that every table holds exactly what
+the backfill wrote assumes the DB contains only slates discovery still finds.
+`data/analytics.db` is rebuildable — delete it first if it holds slates from an
+older manifest, or that check reports them as stale rows.
+
 Exit code 0 = all gates passed; 1 = something failed (details printed).
 """
 
@@ -70,6 +75,13 @@ def row_counts(conn: sqlite3.Connection) -> dict[str, int]:
         table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         for table in _SLATE_TABLES
     }
+
+
+def print_status_counts(summary, header: str) -> None:
+    counts = summary.status_counts()
+    print(f"\n  {header}:")
+    for source in SOURCES:
+        print(f"    {source:<12} " + ", ".join(f"{k} {v}" for k, v in sorted(counts[source].items())))
 
 
 # --- Part 1: discovery --------------------------------------------------------
@@ -189,10 +201,7 @@ def dry_run_gate(conn: sqlite3.Connection, discovery: Discovery, per_coverage: i
         f"{read_any}/{len(summary.results)} slates validated at least one source",
     )
 
-    counts = summary.status_counts()
-    print("\n  per-source status across the sample:")
-    for source in SOURCES:
-        print(f"    {source:<12} " + ", ".join(f"{k} {v}" for k, v in sorted(counts[source].items())))
+    print_status_counts(summary, "per-source status across the sample")
     print("\n  rows that would be read:")
     for table, n in sorted(summary.totals.items()):
         print(f"    {table:<16} {n:>8,}")
@@ -225,10 +234,17 @@ def backfill_gate(conn: sqlite3.Connection, discovery: Discovery) -> None:
         else f"{len(summary.failures)} failure(s), first: {summary.failures[0]}",
     )
 
-    counts = summary.status_counts()
-    print("\n  per-source status:")
-    for source in SOURCES:
-        print(f"    {source:<12} " + ", ".join(f"{k} {v}" for k, v in sorted(counts[source].items())))
+    warnings = summary.warnings
+    if warnings:
+        print(f"\n  {len(warnings)} validation warning(s):")
+        for slate_id, source, warning in warnings[:10]:
+            print(f"    {slate_id} [{source}] {warning}")
+        if len(warnings) > 10:
+            print(f"    ... and {len(warnings) - 10} more")
+    else:
+        print("\n  no validation warnings.")
+
+    print_status_counts(summary, "per-source status")
 
     print("\n  rows written vs rows in the DB:")
     db = row_counts(conn)
@@ -237,11 +253,35 @@ def backfill_gate(conn: sqlite3.Connection, discovery: Discovery) -> None:
         slates = conn.execute(f"SELECT COUNT(DISTINCT slate_id) FROM {table}").fetchone()[0]
         print(f"    {table:<16} wrote {written:>8,}   in DB {db[table]:>8,}   over {slates:>4} slates")
 
+    mismatched = [t for t in _SLATE_TABLES if summary.totals.get(t, 0) != db[t]]
     check(
         "every table holds exactly what the backfill wrote",
-        all(summary.totals.get(t, 0) == db[t] for t in _SLATE_TABLES),
-        "matches" if all(summary.totals.get(t, 0) == db[t] for t in _SLATE_TABLES) else str(db),
+        not mismatched,
+        "matches" if not mismatched else _stale_detail(conn, discovery, summary, mismatched),
     )
+
+
+def _stale_detail(conn, discovery: Discovery, summary, mismatched: list[str]) -> str:
+    """Name what disagrees, not just that something does.
+
+    A bare row-count dump means re-deriving the diff by hand against a 412-slate
+    discovery. The usual cause is rows for a slate discovery no longer finds, so
+    report those slate_ids first, then the per-table deltas.
+    """
+    parts = []
+    for table in mismatched:
+        wrote = summary.totals.get(table, 0)
+        in_db = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        stale = sorted(
+            row[0]
+            for row in conn.execute(f"SELECT DISTINCT slate_id FROM {table}")
+            if row[0] not in discovery.slates
+        )
+        detail = f"{table}: wrote {wrote:,}, DB holds {in_db:,}"
+        if stale:
+            detail += f" — {len(stale)} slate(s) not in discovery: {stale[:5]}"
+        parts.append(detail)
+    return "; ".join(parts)
 
 
 def integrity_gate(conn: sqlite3.Connection) -> None:
@@ -324,6 +364,11 @@ def idempotency_gate(conn: sqlite3.Connection, discovery: Discovery) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # `_failures` is module-level, so a second `main()` call in one process would
+    # otherwise inherit the first run's failures — skipping the backfill and
+    # returning 1 on an otherwise clean run.
+    _failures.clear()
+
     parser = argparse.ArgumentParser(description="Phase 4 gate: orchestrator + backfill.")
     parser.add_argument(
         "--backfill",
@@ -338,6 +383,10 @@ def main(argv: list[str] | None = None) -> int:
         help="slates to dry-run per coverage combination (default 2)",
     )
     args = parser.parse_args(argv)
+    if args.sample < 1:
+        # `--sample 0` samples nothing, and every dry-run check then passes
+        # vacuously — including the one guarding against a vacuous pass.
+        parser.error("--sample must be at least 1")
 
     print("Phase 4 gate — orchestrator + backfill")
     print(f"  salary dir:      {SALARY_DIR}")

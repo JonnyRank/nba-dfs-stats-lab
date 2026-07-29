@@ -33,8 +33,23 @@ DUPLICATE_DK_ID_SALARY = (
 )
 
 
-def salary_rows() -> str:
-    return "".join(f"{i},Player {i},PG/G/UTIL,BOS,NYK,{5000 + i},{i / 10}\n" for i in SLOT_IDS)
+
+def salary_rows(null_team_ids: tuple[int, ...] = ()) -> str:
+    """The 8 rostered players. `null_team_ids` blanks Team/Opponent on those rows.
+
+    A blank Team/Opponent validates with a warning rather than failing — the real
+    data has exactly that on 36 rows of one file. Keeping the full 8-player set
+    means a warning fixture still satisfies the lineup-join invariants.
+    """
+    return "".join(
+        f"{i},Player {i},PG/G/UTIL,{'' if i in null_team_ids else 'BOS'},"
+        f"{'' if i in null_team_ids else 'NYK'},{5000 + i},{i / 10}\n"
+        for i in SLOT_IDS
+    )
+
+
+# Valid, but with a null Team/Opponent on one row — loads with a warning.
+NULL_TEAM_SALARY = SALARY_HEADER + salary_rows(null_team_ids=(SLOT_IDS[0],))
 
 
 def projection_rows() -> str:
