@@ -30,6 +30,7 @@ from conftest import (
     MANIFEST_HEADER,
     NULL_TEAM_SALARY,
     PROJ_HEADER,
+    WARNS_AND_FAILS_SALARY,
     projection_rows,
     rediscover,
 )
@@ -342,6 +343,31 @@ def test_backfill_summary_collects_warnings_across_slates(sources, conn):
     slate_ids = {slate_id for slate_id, _, _ in summary.warnings}
     assert slate_ids == {MAIN_SLATE}
     assert all(source == "salary" for _, source, _ in summary.warnings)
+
+
+def test_an_invalid_file_keeps_the_warnings_it_raised_on_the_way_down(sources, conn):
+    """A file can warn *and* fail; the INVALID outcome must carry both.
+
+    `on_report` fires inside `ingest_*` before it raises, so the warnings are
+    already collected by the time SlateValidationError propagates — the dry-run
+    path keeps them on an INVALID outcome, and the write path has to match.
+    """
+    (sources["salary_dir"] / "Main-2026-05-18.csv").write_text(WARNS_AND_FAILS_SALARY)
+    d = rediscover(sources)
+
+    dry = ingest_slate(d.slates[MAIN_SLATE], conn, dry_run=True)
+    wrote = ingest_slate(d.slates[MAIN_SLATE], conn)
+
+    for result in (dry, wrote):
+        salary = result.outcome("salary")
+        assert salary.status is Status.INVALID
+        assert "duplicate key(s)" in salary.detail
+        assert any("Team: 1 missing value(s)" in w for w in salary.warnings)
+
+    # And it reaches the run summary, which is the point of the tally.
+    summary = backfill(conn, discovery=d, slate_ids=[MAIN_SLATE])
+    assert any("Team: 1 missing value(s)" in w for _, _, w in summary.warnings)
+    assert summary.failures
 
 
 def test_write_path_warns_when_the_manifest_count_disagrees_with_the_file(sources, conn):

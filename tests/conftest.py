@@ -51,6 +51,12 @@ def salary_rows(null_team_ids: tuple[int, ...] = ()) -> str:
 # Valid, but with a null Team/Opponent on one row — loads with a warning.
 NULL_TEAM_SALARY = SALARY_HEADER + salary_rows(null_team_ids=(SLOT_IDS[0],))
 
+# Both at once: a null Team/Opponent (warning) and a duplicate dk_id (error).
+# The warning must survive onto the INVALID outcome, not be lost with the file.
+WARNS_AND_FAILS_SALARY = (
+    SALARY_HEADER + salary_rows(null_team_ids=(SLOT_IDS[0],)) + f"{SLOT_IDS[0]},Dupe,PG,BOS,NYK,4000,10\n"
+)
+
 
 def projection_rows() -> str:
     return "".join(f"{i},Player {i},BOS,NYK,32.5,1.1,35.2,12.5\n" for i in SLOT_IDS)

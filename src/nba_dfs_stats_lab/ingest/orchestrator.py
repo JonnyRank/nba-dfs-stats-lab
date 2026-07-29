@@ -341,18 +341,29 @@ def _run_flat_source(
     """One file -> one table (salary, projections). Never raises for one slate."""
     if path is None:
         return SourceOutcome(source, Status.ABSENT)
+    # Bound before the try so the failure arms can report warnings collected
+    # before the failure. A file can both warn and fail — `on_report` fires
+    # inside `ingest_*` before it raises, and the dry-run path keeps those
+    # warnings on an INVALID outcome, so the write path has to as well.
+    warnings, on_report = _warning_collector()
     try:
         if dry_run:
             return _dry_run_outcome(source, validate(read(path)), table)
-        warnings, on_report = _warning_collector()
         rows = ingest(path, slate_id, conn, on_report=on_report)
         return SourceOutcome(
             source, Status.LOADED, rows={table: rows}, warnings=tuple(warnings)
         )
     except SlateValidationError as exc:
-        return SourceOutcome(source, Status.INVALID, detail=str(exc))
+        return SourceOutcome(
+            source, Status.INVALID, detail=str(exc), warnings=tuple(warnings)
+        )
     except _SLATE_ERRORS as exc:
-        return SourceOutcome(source, Status.ERROR, detail=f"{type(exc).__name__}: {exc}")
+        return SourceOutcome(
+            source,
+            Status.ERROR,
+            detail=f"{type(exc).__name__}: {exc}",
+            warnings=tuple(warnings),
+        )
 
 
 def _run_lineups(
@@ -410,6 +421,9 @@ def _run_lineups(
                 detail=f"slate_players is empty for this slate (salary is {salary_outcome.status})",
             )
 
+    # See `_run_flat_source`: bound before the try so a file that both warns and
+    # fails still reports its warnings.
+    warnings, on_report = _warning_collector()
     try:
         if dry_run:
             df = read_lineups(lineups_file.path)
@@ -427,7 +441,6 @@ def _run_lineups(
                     f"manifest says {lineups_file.n_lineups} lineups, file has {report.row_count}",
                 )
             return outcome
-        warnings, on_report = _warning_collector()
         load = ingest_lineups(lineups_file.path, slate_id, conn, on_report=on_report)
         if load.lineups != lineups_file.n_lineups:
             warnings.append(
@@ -440,9 +453,16 @@ def _run_lineups(
             warnings=tuple(warnings),
         )
     except SlateValidationError as exc:
-        return SourceOutcome("lineups", Status.INVALID, detail=str(exc))
+        return SourceOutcome(
+            "lineups", Status.INVALID, detail=str(exc), warnings=tuple(warnings)
+        )
     except _SLATE_ERRORS as exc:
-        return SourceOutcome("lineups", Status.ERROR, detail=f"{type(exc).__name__}: {exc}")
+        return SourceOutcome(
+            "lineups",
+            Status.ERROR,
+            detail=f"{type(exc).__name__}: {exc}",
+            warnings=tuple(warnings),
+        )
 
 
 def ingest_slate(
