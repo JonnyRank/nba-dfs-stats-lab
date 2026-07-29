@@ -21,6 +21,7 @@ Mirrors the projections four-method shape, with two source-specific additions:
 import logging
 import re
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -156,7 +157,12 @@ def normalize_lineup_players(df: pd.DataFrame, slate_id: str) -> pd.DataFrame:
     )
 
 
-def ingest_lineups(path: Path, slate_id: str, conn: sqlite3.Connection) -> LineupsLoad:
+def ingest_lineups(
+    path: Path,
+    slate_id: str,
+    conn: sqlite3.Connection,
+    on_report: Callable[[ValidationReport], None] | None = None,
+) -> LineupsLoad:
     """read → validate → (stop if errors) → normalize → two `load_slate` calls.
 
     The two loads are separate transactions (that is `load_slate`'s contract),
@@ -164,10 +170,15 @@ def ingest_lineups(path: Path, slate_id: str, conn: sqlite3.Connection) -> Lineu
     `lineup_players` still holds the previous load. Both writes are
     delete-then-insert keyed on slate_id, so simply re-running the slate repairs
     it — nothing is duplicated or half-inserted within a table.
+
+    `on_report` receives the `ValidationReport` before the writes, so a caller
+    can count warnings on the success path (see `ingest_salary`).
     """
     path = Path(path)
     df = read_lineups(path)
     report = validate_lineups(df)
+    if on_report is not None:
+        on_report(report)
     for warning in report.warnings:
         logger.warning("%s [%s]: %s", slate_id, path.name, warning)
     if not report.ok:

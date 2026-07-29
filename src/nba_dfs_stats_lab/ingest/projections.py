@@ -7,6 +7,7 @@ in Phase 3.
 
 import logging
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -36,16 +37,26 @@ def normalize_projections(df: pd.DataFrame, slate_id: str) -> pd.DataFrame:
     return normalize_frame(df, PROJECTIONS_SCHEMA, slate_id)
 
 
-def ingest_projections(path: Path, slate_id: str, conn: sqlite3.Connection) -> int:
+def ingest_projections(
+    path: Path,
+    slate_id: str,
+    conn: sqlite3.Connection,
+    on_report: Callable[[ValidationReport], None] | None = None,
+) -> int:
     """read → validate → (stop if errors) → normalize → load_slate.
 
     Returns rows written. On validation errors nothing is written and
     SlateValidationError (carrying the full report) is raised — the orchestrator
     catches it per-slate; warnings are logged but don't block.
+
+    `on_report` receives the `ValidationReport` before the write, so a caller can
+    count warnings on the success path (see `ingest_salary`).
     """
     path = Path(path)  # tolerate str paths from callers
     df = read_projections(path)
     report = validate_projections(df)
+    if on_report is not None:
+        on_report(report)
     for warning in report.warnings:
         logger.warning("%s [%s]: %s", slate_id, path.name, warning)
     if not report.ok:

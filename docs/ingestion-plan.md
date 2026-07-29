@@ -231,8 +231,8 @@ ingest_projections(path, slate_id, conn) -> int        # read→validate→(stop
 
 ### Phase 4 — Orchestrator + backfill
 - `ingest/orchestrator.py`: `ingest_day(date, slate_type, conn)` building `slate_id` and calling the three source ingests; a discovery routine that finds the matching files across the three dirs for a given slate; and a `--dry-run` that validates without writing.
-- ✋ **Gate:** dry-run a handful of slates and show the validation summary **before** writing anything.
-- Then backfill all historical slates. Report total slates and per-table row counts.
+- ✋ **Gate (dry-run half) — CLEARED 2026-07-28.** Two commands: `uv run python scripts/verify_phase4.py` (all PASS — it samples slates per coverage combination), then the orchestrator's own CLI over every slate, `uv run python -m nba_dfs_stats_lab.ingest.orchestrator --dry-run`. Result: **412 slates discovered, 0 validation failures**, 0 unresolved filenames. Coverage 363 salary-only / 43 all-three / 3 salary+projections / 3 projections-only. Would write 51,971 + 8,856 + 71,109 + 568,872 rows. Two warnings total, both the known nullable `Team`/`Opponent` rows on `2026-02-02_classic_main`. The gate proves the dry run wrote nothing by comparing all four table counts before and after.
+- Then backfill all historical slates — `scripts/verify_phase4.py --backfill`, which re-runs the dry-run gate first and then re-checks the Phase 3 integrity invariants across the whole DB. Report total slates and per-table row counts. **Not yet run.**
 
 ### Phase 5 — Crosswalk + unmatched report
 - `ingest/crosswalk.py`: pull distinct `(dk_id, name)` from `slate_players`; match `name` against ops `dim_players.PLAYER_NAME` (read-only ATTACH) with a normalized/fuzzy match + confidence score; map `dk_id → PLAYER_ID`.
