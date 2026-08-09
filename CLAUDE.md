@@ -12,30 +12,30 @@ Ingest DraftKings DFS data into a local SQLite analytics DB (`data/analytics.db`
 
 _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 
-**Current phase:** Phase 5 — crosswalk. **Code shipped and at its gate; awaiting Jonny's review of 4 names.** Nothing written to `dk_crosswalk` yet.
-**Last gate cleared:** Phase 4 — `uv run python scripts/verify_phase4.py --backfill`, all PASS 2026-07-28. **`data/analytics.db` is fully backfilled.**
+**Current phase:** Phase 6 / ops-reconciliation pass — not started.
+**Last gate cleared:** Phase 5 — `uv run python scripts/verify_phase5.py --write --apply docs/crosswalk-approvals.csv`, all 22 PASS 2026-08-09. **`dk_crosswalk` is built: 51,734 rows.**
 
-### Phase 5 gate — run this (2026-08-09, all PASS, wrote nothing)
+### Phase 5 results (2026-08-09) — 599 of 610 names mapped
 
+**Reproduce the whole crosswalk from scratch** (approvals are tracked in git, so this needs no human):
 ```
-uv run python scripts/verify_phase5.py                       # the gate: report only
-uv run python scripts/verify_phase5.py --review review.csv   # export the 4 names to approve
-# ...tick `approve` = y on the rows you accept, then:
-uv run python scripts/verify_phase5.py --write --apply review.csv
+uv run python scripts/verify_phase5.py                                          # report only, writes nothing
+uv run python scripts/verify_phase5.py --write --apply docs/crosswalk-approvals.csv
 ```
 
-**597 / 610 names auto-matched (97.9%), 51,633 / 51,971 `slate_players` rows (99.3%).** 593 exact + 4 normalized. 0 ambiguous, 0 normalization collisions on either side, ops probe write still rejected.
+| | Names | `slate_players` rows |
+|---|---|---|
+| auto-matched (593 exact + 4 normalized) | 597 | 51,633 (99.3%) |
+| + Jonny-approved | 2 | 101 |
+| **`dk_crosswalk` total** | **599** | **51,734 (99.5%)** |
+| unmatched | 11 | 237 |
 
-**4 names awaiting review** — nothing about them is written until approved:
+All 22 gate checks PASS: 0 ambiguous, 0 normalization collisions on either side, ops probe write still rejected, 0 orphan `dk_id`, every `player_id` real in ops, nothing unapproved written, re-running changes no row count.
 
-| DK name | Best ops candidate | Score | Verdict |
-|---|---|---|---|
-| `Yanic Niederhauser` | `Yanic Konan Niederhauser` (1642949) | 0.93 | almost certainly the same player (dropped middle name) |
-| `Hansen Yang` | `Yang Hansen` (1642905) | 0.80 | almost certainly the same player (reversed name order) — **98 dk_ids, the one that matters** |
-| `RJ Davis` | `Ed Davis` / `Johnny Davis` / `Terence Davis` | 0.73 | **different people** — expect to reject all three |
-| `Cameron Matthews` | `Wesley Matthews` (202083) | 0.67 | **different people** — expect to reject |
+**Approved (2 of 4 reviewed):** `Yanic Niederhauser` → `Yanic Konan Niederhauser` (1642949) · `Hansen Yang` → `Yang Hansen` (1642905).
+**Rejected:** `RJ Davis`, `Cameron Matthews` — the candidates offered (`Ed`/`Johnny`/`Terence Davis`, `Wesley Matthews`) are different people, and both DK names are themselves absent from ops.
 
-**9 unmatched (235 rows), all genuinely absent from ops** — verified: not one of those surnames exists anywhere in `dim_players`, and ops holds no non-ASCII names, so nothing is hiding behind a fold. Thomas Sorber (108), Nikola Djurisic (54), Eli Ndiaye (35), Alex Toohey (26), Kyle Mangas (5), Tyreke Key (4), Augustas Marciulionis, Taevion Kinsey, Zack Austin (1 each). These are rookies/two-ways with no logged games in the ops snapshot — they belong in `unmatched_report()`, not in `dk_crosswalk`.
+**11 unmatched (237 rows) — all genuinely absent from ops, not a matcher failure.** Verified: not one of those surnames exists anywhere in `dim_players`, and ops holds no non-ASCII names, so nothing is hiding behind a fold. Thomas Sorber (108), Nikola Djurisic (54), Eli Ndiaye (35), Alex Toohey (26), Kyle Mangas (5), Tyreke Key (4), Augustas Marciulionis, Cameron Matthews, RJ Davis, Taevion Kinsey, Zack Austin (1 each). Rookies and two-ways who made DK's player pool but never logged an NBA second. `unmatched_report()` is the standing monitor — re-run it after each new slate.
 
 ### Backfill results (2026-07-28) — 412 slates, 0 failures
 
@@ -64,8 +64,7 @@ uv run python scripts/verify_phase5.py --write --apply review.csv
 - 7 files are unmatchable: no slate CSV exists for Feb 13–22, 2026. Parked in `unmatched/`.
 
 **Next**
-- **Phase 5 — review the 4 names above**, then `--write --apply` to build `dk_crosswalk`. That's the only step left.
-- **Then the ops-reconciliation pass** (needs the crosswalk): compare `actual_fpts` against box scores, starting with the 209 off-slate rows above. Check whether those games were rescheduled and played before nulling anything.
+- **The ops-reconciliation pass** (needs the crosswalk): compare `actual_fpts` against box scores, starting with the 209 off-slate rows above. Check whether those games were rescheduled and played before nulling anything.
 - Small follow-up: warnings are logged twice on the write path — once by `ingest_*` (keyed by filename) and once by `ingest_slate` (keyed by source), so `--backfill` prints each one as a pair. Cosmetic only; the counted tally is right.
 
 **Local working notes** (gitignored via `docs/*.local.md`, so a fresh session sees them on disk but not in git):
@@ -79,7 +78,9 @@ uv run python scripts/verify_phase5.py --write --apply review.csv
 - **The `REVIEW_FLOOR` (0.60) hides nothing.** Names below it are reported as unmatched *with their nearest candidate and score*, precisely so a real match under the floor stays visible. That property is what surfaced Hansen Yang before the token-sort fix existed.
 - **Ambiguity is refused, never resolved.** Two ops players collapsing to one normalized key ⇒ `Tier.AMBIGUOUS`, all candidates shown, nothing written. Zero exist in the current snapshot (1181 ops names → 1181 keys; 610 DK names → 610 keys) — the guard is for the next snapshot. An identical *raw* string still wins over a normalized collision, since that's unambiguous evidence.
 - **`write_crosswalk` upserts; it does not delete-then-insert like `load_slate`.** Approvals arrive in batches over time, so rebuilding from one batch would silently drop mappings approved in an earlier one. `--rebuild` is the explicit way to clear. Re-approving a name corrects it in place.
-- **The 9 unmatched names are genuinely absent from ops**, not a matcher failure — verified 2026-08-09 by searching `dim_players` for each surname (zero hits) and confirming ops holds **no non-ASCII names at all**, so nothing is hiding behind an accent fold. They're rookies/two-ways with no logged games in the snapshot. `unmatched_report()` is the standing monitor: re-run after each new slate and a newly-arrived player shows up as a line.
+- **The approvals live in git (`docs/crosswalk-approvals.csv`), not in `data/`.** They are the **only non-reproducible input in the project** — everything else rebuilds from source CSVs and code. `data/` is gitignored and the docs actively tell you to delete `analytics.db` and re-ingest, which would silently rebuild the crosswalk for 597 names and drop the 2 approved ones. Keeping the ticked CSV tracked makes the whole crosswalk reproducible with no human in the loop, and makes the one genuinely human decision reviewable in a PR.
+- **One ops player can legitimately have two DK spellings; the reverse must never happen.** DK renamed Yanic Niederhauser mid-season — `Yanic Niederhauser` for the first 3 slates (2025-10-22 … 10-28), then `Yanic Konan Niederhauser` for the next 97 (from 2025-10-31). Both now map to ops 1642949, which is why `dk_crosswalk` holds 599 names but 598 distinct `player_id`s. That direction is correct and expected: it stitches the October slates onto the rest of his season instead of orphaning them. The gate enforces the *other* direction — "each name maps to one `player_id` across all its `dk_ids`" — because one DK name resolving to two players would be the actual corruption. **Had the approval been rejected, those 3 slates would have been silently lost from his box-score joins.**
+- **The 11 unmatched names are genuinely absent from ops**, not a matcher failure — verified 2026-08-09 by searching `dim_players` for each surname (zero hits) and confirming ops holds **no non-ASCII names at all**, so nothing is hiding behind an accent fold. They're rookies/two-ways with no logged games in the snapshot. `unmatched_report()` is the standing monitor: re-run after each new slate and a newly-arrived player shows up as a line.
 - **Off-slate games are warned about, never dropped.** Some games carry `Actual_FPTs = 0` on **every** player of **both** sides. Confirmed with Jonny 2026-07-28: they tipped off outside the slate's window (an odd-hour start, e.g. 3:30pm Sunday when everything else began at 6), so the game was never in that contest. Null-based validation cannot see this — the cells hold `0`, not blank, and there is not one blank `Actual_FPTs` cell in all 409 files — so it lands in `actual_fpts` as a real `0.0`, indistinguishable from a DNP. The discriminator must be the whole game, not the value: single zeros are normal and common, so a value-keyed rule would destroy real data. Warning, not error; the rows load, and exclusion is the ops-reconciliation pass's call. Full reasoning in `ingest/salary.py:check_zero_scored_games`.
 - **Partial coverage is a reported state, not a failure.** `Status.ABSENT` contributes nothing to the failure count — 363 of 412 slates are salary-only. Only a file that is *present and unusable* (`INVALID`/`ERROR`) fails, and one bad file never aborts a backfill.
 - **Lineups require the slate to have players; projections don't.** `lineup_players.dk_id` must join to `slate_players` (0-orphans is a gate check), so lineups are `SKIPPED` when the slate has no players. Projections are deliberately not gated that way: `2026-02-19/-02-20/-02-22` have projections and no salary CSV at all, and refusing them would discard data rather than surface the gap.

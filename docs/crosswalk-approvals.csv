@@ -1,0 +1,7 @@
+approve,dk_name,player_id,ops_name,score,reason,tier,dk_ids,slates
+y,Yanic Niederhauser,1642949,Yanic Konan Niederhauser,0.929,"ratio 0.86, 2/2 tokens shared, surname match",review,3,3
+y,Hansen Yang,1642905,Yang Hansen,0.800,"ratio 0.55 (sorted 1.00), 2/2 tokens shared, surname differs",review,98,98
+,RJ Davis,202334,Ed Davis,0.725,"ratio 0.75, 1/2 tokens shared, surname match",review,1,1
+,RJ Davis,1631098,Johnny Davis,0.700,"ratio 0.70, 1/2 tokens shared, surname match",review,1,1
+,RJ Davis,1629056,Terence Davis,0.683,"ratio 0.67, 1/2 tokens shared, surname match",review,1,1
+,Cameron Matthews,202083,Wesley Matthews,0.673,"ratio 0.65, 1/2 tokens shared, surname match",review,1,1

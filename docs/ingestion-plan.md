@@ -239,11 +239,12 @@ ingest_projections(path, slate_id, conn) -> int        # read→validate→(stop
 - Surface low-confidence matches for Jonny to review; write **approved** mappings only into `dk_crosswalk`.
 - `unmatched_report()`: `dk_id`s in `slate_players` with no `dk_crosswalk` row — for ongoing monitoring of new players.
 - **Spec correction forced by the real data:** `dk_id` is issued **per slate**, not per player — 51,971 distinct ids behind 610 distinct names. Matching is therefore done over *names* and fanned out to the `dk_id` grain on write. Recorded in CLAUDE.md Decisions.
-- ✋ **Gate — code complete 2026-08-09, awaiting Jonny's review.** `uv run python scripts/verify_phase5.py` — all PASS, **writes nothing**, which is the gate: it prints the match rate and the low-confidence list *before* anything is written.
-  - **597 / 610 names auto-matched (97.9%)** = 593 exact + 4 normalized; **51,633 / 51,971 rows (99.3%)**. 0 ambiguous, 0 normalization collisions on either side, ops probe write still rejected with `attempt to write a readonly database`.
-  - **4 names to review:** `Yanic Niederhauser`→`Yanic Konan Niederhauser` (0.93) and `Hansen Yang`→`Yang Hansen` (0.80) look right; `RJ Davis` and `Cameron Matthews` are different people and should be rejected.
-  - **9 unmatched (235 rows)** — confirmed genuinely absent from `dim_players`, not a matcher failure.
-  - To finish: `--review review.csv` → tick `approve` → `--write --apply review.csv`. The gate re-checks the result (no orphan `dk_id`, every `player_id` in ops, nothing unapproved written, idempotent re-write).
+- ✋ **Gate — CLEARED 2026-08-09** (`uv run python scripts/verify_phase5.py --write --apply docs/crosswalk-approvals.csv`, all 22 PASS). The gate ran in two stages, as designed: a report-only run put the match rate and the low-confidence list in front of Jonny *before* anything was written, then the write ran against his ticked approvals.
+  - **597 / 610 names auto-matched (97.9%)** = 593 exact + 4 normalized, **+2 approved** = **599 names / 51,734 rows (99.5%)** in `dk_crosswalk`.
+  - Approved: `Yanic Niederhauser`→`Yanic Konan Niederhauser` (0.93), `Hansen Yang`→`Yang Hansen` (0.80). Rejected: `RJ Davis`, `Cameron Matthews` — the offered candidates are different people and both DK names are themselves absent from ops.
+  - **11 unmatched (237 rows)** — confirmed genuinely absent from `dim_players`, not a matcher failure. Rookies/two-ways in DK's pool who never logged an NBA second.
+  - Post-write: 0 orphan `dk_id`, every `player_id` real in ops, nothing unapproved written, one `player_id` per `dk_id`, one `player_id` per name, re-run changed no row count. 0 ambiguous, 0 normalization collisions, ops probe write still rejected with `attempt to write a readonly database`.
+  - **The approvals are tracked at `docs/crosswalk-approvals.csv`**, so the crosswalk rebuilds from scratch with no human in the loop — they are the only non-reproducible input in the project. See CLAUDE.md Decisions.
 
 ---
 
