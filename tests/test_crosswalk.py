@@ -24,6 +24,7 @@ from nba_dfs_stats_lab.ingest.crosswalk import (
     apply_approvals,
     clear_crosswalk,
     coverage,
+    main as crosswalk_main,
     match_players,
     normalize_name,
     read_approvals,
@@ -629,3 +630,95 @@ def test_every_approved_id_is_still_offered_as_a_candidate(conn):
     report = match_players(conn)
     resolved = apply_approvals(report, read_approvals(APPROVALS))
     assert {m.name: m.player_id for m in resolved} == APPROVED
+
+
+# --- the CLI's --rebuild ------------------------------------------------------
+#
+# The only flag with no coverage at either layer. It is one DELETE, but it is
+# also the one path that removes crosswalk rows, and `write_crosswalk` upserts
+# precisely so that batches accumulate — so a --rebuild that fired when it
+# shouldn't would silently drop every mapping approved in an earlier batch.
+
+
+def test_rebuild_without_writing_is_refused(capsys):
+    """--rebuild alone would clear the table and write nothing back."""
+    assert crosswalk_main(["--rebuild"]) == 2
+    assert "only makes sense with --write" in capsys.readouterr().err
+
+
+@pytest.fixture
+def cli(tmp_path, monkeypatch):
+    """Drive `crosswalk.main` against temp DBs, letting it own its connections.
+
+    `main` opens and closes its own connection, so the fixture hands out a fresh
+    one per call rather than the module-level `conn` — that is also the shape the
+    real CLI runs in.
+    """
+    ops_path = tmp_path / "ops.db"
+    ops = sqlite3.connect(ops_path)
+    ops.execute(
+        "CREATE TABLE dim_players (PLAYER_ID INTEGER PRIMARY KEY, PLAYER_NAME TEXT)"
+    )
+    ops.executemany("INSERT INTO dim_players VALUES (?, ?)", OPS_PLAYERS)
+    ops.commit()
+    ops.close()
+
+    db_path = tmp_path / "analytics.db"
+    setup = sqlite3.connect(db_path, uri=True)
+    init_db(setup)
+    setup.close()
+
+    monkeypatch.setattr(
+        "nba_dfs_stats_lab.ingest.crosswalk.get_connection",
+        lambda: sqlite3.connect(db_path, uri=True),
+    )
+    monkeypatch.setattr(
+        "nba_dfs_stats_lab.ingest.crosswalk.attach_ops",
+        lambda c, *a, **k: c.execute(
+            "ATTACH DATABASE ? AS ops", (f"file:{ops_path.as_posix()}?mode=ro",)
+        ),
+    )
+    return db_path
+
+
+def query(db_path, sql):
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+
+def seed(db_path, players, crosswalk_rows=()):
+    conn = sqlite3.connect(db_path, uri=True)
+    add_players(conn, players)
+    if crosswalk_rows:
+        write_crosswalk(conn, crosswalk_rows)
+    conn.close()
+
+
+def test_rebuild_clears_before_writing(cli, capsys):
+    """A stale mapping from an earlier batch must not survive --rebuild."""
+    seed(
+        cli,
+        [("s1", 1, "LeBron James")],
+        [NameMatch(name="Stale Name", tier=Tier.EXACT, dk_ids=(99,), player_id=2544)],
+    )
+    assert query(cli, "SELECT COUNT(*) FROM dk_crosswalk") == [(1,)]
+
+    assert crosswalk_main(["--write", "--rebuild"]) == 0
+    assert "cleared 1 existing dk_crosswalk row(s)" in capsys.readouterr().out
+    # Only the auto-matched LeBron survives; the stale row is gone.
+    assert query(cli, "SELECT dk_id FROM dk_crosswalk") == [(1,)]
+
+
+def test_write_without_rebuild_keeps_earlier_rows(cli):
+    """The contrast that gives the test above its meaning: without --rebuild the
+    upsert accumulates, which is why approvals can arrive in batches."""
+    seed(
+        cli,
+        [("s1", 1, "LeBron James")],
+        [NameMatch(name="Earlier Batch", tier=Tier.EXACT, dk_ids=(99,), player_id=2544)],
+    )
+    assert crosswalk_main(["--write"]) == 0
+    assert query(cli, "SELECT dk_id FROM dk_crosswalk ORDER BY dk_id") == [(1,), (99,)]

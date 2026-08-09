@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from nba_dfs_stats_lab.db.schema import init_db
+from nba_dfs_stats_lab.ingest.crosswalk import Candidate, MatchReport, NameMatch, Tier
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "verify_phase5.py"
 
@@ -279,3 +280,34 @@ def test_gate_reports_a_writable_ops_attach_as_a_failure(verify, monkeypatch, tm
     out = capsys.readouterr().out
     assert "[FAIL] probe write to ops is rejected" in out
     assert "the ATTACH is WRITABLE" in out
+
+
+def test_an_ambiguous_name_hiding_its_alternatives_fails_the_gate(verify, gate):
+    """The check replacing the old tautology has to be able to fail.
+
+    `match_players` builds AMBIGUOUS candidates from the colliding bucket, so
+    this state is unreachable through it today — the check is a regression guard
+    against a future matcher that refuses a name without showing why, which
+    would leave Jonny a rejection he cannot act on. Unlike the check it replaced
+    (`approvable` is False for AMBIGUOUS by the property's own definition, so no
+    data could ever fail it), this one is a property of the report.
+    """
+    conn = sqlite3.connect(gate, uri=True)
+    try:
+        report = MatchReport(
+            matches=[
+                NameMatch(
+                    name="Gary Payton Jr.",
+                    tier=Tier.AMBIGUOUS,
+                    dk_ids=(1,),
+                    candidates=(Candidate(1, "Gary Payton", 1.0, "normalized tie"),),
+                )
+            ],
+            ops_player_count=5,
+        )
+        verify._failures.clear()
+        verify.match_gate(conn, report)
+        assert any("colliding candidates" in f for f in verify._failures)
+        verify._failures.clear()
+    finally:
+        conn.close()

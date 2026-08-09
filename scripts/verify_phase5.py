@@ -197,11 +197,23 @@ def match_gate(conn: sqlite3.Connection, report: MatchReport) -> None:
         all(m.player_id is None for m in report.matches if m.tier not in AUTO_TIERS),
         "a proposal must not look like a decision",
     )
+    # "No AMBIGUOUS name is approvable" would be a third tautology: `approvable`
+    # requires `tier in AUTO_TIERS`, which never holds for AMBIGUOUS, so the
+    # predicate is constant regardless of what the tier actually contains — and
+    # the decision half is already covered by the check above. What is *not*
+    # checked anywhere is the other half of the refusal: ambiguity is refused
+    # AND every colliding candidate is shown, which is what makes the line
+    # actionable instead of just a rejection.
+    ambiguous = report.by_tier(Tier.AMBIGUOUS)
     check(
-        "no auto-matched name is ambiguous",
-        counts[Tier.AMBIGUOUS.value] == 0
-        or not any(m.approvable for m in report.matches if m.tier is Tier.AMBIGUOUS),
-        f"{counts[Tier.AMBIGUOUS.value]} ambiguous name(s)",
+        "every ambiguous name shows all its colliding candidates",
+        all(len(m.candidates) > 1 for m in ambiguous),
+        f"{len(ambiguous)} ambiguous name(s)"
+        + (
+            ""
+            if all(len(m.candidates) > 1 for m in ambiguous)
+            else f"; {[m.name for m in ambiguous if len(m.candidates) <= 1][:3]} show fewer than 2"
+        ),
     )
 
     # Asking dk_crosswalk whether a dk_id appears twice is a tautology — dk_id is
