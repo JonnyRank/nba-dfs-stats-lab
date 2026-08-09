@@ -238,7 +238,12 @@ ingest_projections(path, slate_id, conn) -> int        # read→validate→(stop
 - `ingest/crosswalk.py`: pull distinct `(dk_id, name)` from `slate_players`; match `name` against ops `dim_players.PLAYER_NAME` (read-only ATTACH) with a normalized/fuzzy match + confidence score; map `dk_id → PLAYER_ID`.
 - Surface low-confidence matches for Jonny to review; write **approved** mappings only into `dk_crosswalk`.
 - `unmatched_report()`: `dk_id`s in `slate_players` with no `dk_crosswalk` row — for ongoing monitoring of new players.
-- ✋ **Gate:** show match-rate and the low-confidence list for review before writing.
+- **Spec correction forced by the real data:** `dk_id` is issued **per slate**, not per player — 51,971 distinct ids behind 610 distinct names. Matching is therefore done over *names* and fanned out to the `dk_id` grain on write. Recorded in CLAUDE.md Decisions.
+- ✋ **Gate — code complete 2026-08-09, awaiting Jonny's review.** `uv run python scripts/verify_phase5.py` — all PASS, **writes nothing**, which is the gate: it prints the match rate and the low-confidence list *before* anything is written.
+  - **597 / 610 names auto-matched (97.9%)** = 593 exact + 4 normalized; **51,633 / 51,971 rows (99.3%)**. 0 ambiguous, 0 normalization collisions on either side, ops probe write still rejected with `attempt to write a readonly database`.
+  - **4 names to review:** `Yanic Niederhauser`→`Yanic Konan Niederhauser` (0.93) and `Hansen Yang`→`Yang Hansen` (0.80) look right; `RJ Davis` and `Cameron Matthews` are different people and should be rejected.
+  - **9 unmatched (235 rows)** — confirmed genuinely absent from `dim_players`, not a matcher failure.
+  - To finish: `--review review.csv` → tick `approve` → `--write --apply review.csv`. The gate re-checks the result (no orphan `dk_id`, every `player_id` in ops, nothing unapproved written, idempotent re-write).
 
 ---
 
