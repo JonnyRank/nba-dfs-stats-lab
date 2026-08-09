@@ -16,6 +16,8 @@ nothing** and its job is to put those two things in front of Jonny.
   - `dim_players` is readable and non-empty
   - every distinct `slate_players` name is tiered exactly once
   - no name is auto-matched ambiguously, and no auto-match lacks a player_id
+  - no `slate_players` `dk_id` appears under two names — the precondition for
+    `write_crosswalk`'s refusal, checked before anything is written
   - normalization introduces no collisions on either side
   - the match report is printed in full: rate, review queue, unmatched
   - `dk_crosswalk`'s row count is identical before and after — the gate itself
@@ -27,8 +29,6 @@ nothing** and its job is to put those two things in front of Jonny.
   - every written `dk_id` exists in `slate_players`
   - every written `player_id` exists in ops `dim_players`
   - no `REVIEW`/`AMBIGUOUS`/`NONE` name was written unless it was approved
-  - no `slate_players` `dk_id` appears under two names (the case the upsert
-    would otherwise resolve last-wins, silently)
   - each name maps to one `player_id` across all its `dk_id`s
   - re-running the write changes no row count (idempotency)
   - the unmatched report accounts for exactly what wasn't written
@@ -204,6 +204,24 @@ def match_gate(conn: sqlite3.Connection, report: MatchReport) -> None:
         f"{counts[Tier.AMBIGUOUS.value]} ambiguous name(s)",
     )
 
+    # Asking dk_crosswalk whether a dk_id appears twice is a tautology — dk_id is
+    # its PRIMARY KEY, so the answer is 0 however the write went. The question
+    # that bites is asked of the *source*, and it belongs here in Part 1 rather
+    # than after the write: one dk_id under two names is two NameMatches both
+    # fanning out to it, which `write_crosswalk` now refuses. This is the
+    # precondition for that refusal, so a report-only run must surface it —
+    # a check that only fires under --write would answer after the fact.
+    two_named = conn.execute(
+        "SELECT COUNT(*) FROM (SELECT dk_id FROM slate_players "
+        "WHERE name IS NOT NULL AND TRIM(name) <> '' "
+        "GROUP BY dk_id HAVING COUNT(DISTINCT TRIM(name)) > 1)"
+    ).fetchone()[0]
+    check(
+        "no slate_players dk_id appears under two names",
+        two_named == 0,
+        f"{two_named} dk_id(s) with more than one name",
+    )
+
     auto_ids, total_ids = report.dk_id_coverage()
     total_rows = conn.execute("SELECT COUNT(*) FROM slate_players").fetchone()[0]
     check(
@@ -278,22 +296,6 @@ def write_gate(
         f"{len(leaked)} leaked: {leaked[:5]}"
         if leaked
         else f"{len(written_names)} name(s) written",
-    )
-
-    # Asking dk_crosswalk whether a dk_id appears twice is a tautology — dk_id is
-    # its PRIMARY KEY, so the answer is 0 however the write went. The question
-    # that actually bites is asked of the *source*: one dk_id under two names is
-    # two NameMatches, and before `write_crosswalk` learned to refuse it, the
-    # upsert resolved that last-wins with nothing logged. Zero on today's data.
-    two_named = conn.execute(
-        "SELECT COUNT(*) FROM (SELECT dk_id FROM slate_players "
-        "WHERE name IS NOT NULL AND TRIM(name) <> '' "
-        "GROUP BY dk_id HAVING COUNT(DISTINCT TRIM(name)) > 1)"
-    ).fetchone()[0]
-    check(
-        "no slate_players dk_id appears under two names",
-        two_named == 0,
-        f"{two_named} dk_id(s) with more than one name",
     )
 
     # A name must not map to two different ops players across its dk_ids.

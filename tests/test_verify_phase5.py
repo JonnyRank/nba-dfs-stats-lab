@@ -129,6 +129,33 @@ def test_probe_write_to_ops_is_rejected(verify, gate, capsys):
     assert "[PASS] probe write to ops is rejected" in capsys.readouterr().out
 
 
+def test_a_dk_id_under_two_names_fails_the_report_only_gate(
+    verify, monkeypatch, tmp_path, capsys
+):
+    """The precondition for `write_crosswalk`'s refusal, and it has to surface
+    *before* anything is written — a check that only ran under --write would
+    answer after the fact. dk_id 7 is issued to two different people."""
+    db_path, ops_path = build_db(
+        tmp_path,
+        slate_players=(("s1", 7, "LeBron James"), ("s2", 7, "Luka Doncic")),
+    )
+    monkeypatch.setattr(
+        verify, "get_connection", lambda: sqlite3.connect(db_path, uri=True)
+    )
+    monkeypatch.setattr(
+        verify,
+        "attach_ops",
+        lambda conn, *a, **k: conn.execute(
+            "ATTACH DATABASE ? AS ops", (f"file:{ops_path.as_posix()}?mode=ro",)
+        ),
+    )
+
+    assert verify.main([]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] no slate_players dk_id appears under two names" in out
+    assert count(db_path) == 0  # report-only still wrote nothing
+
+
 def test_empty_slate_players_stops_with_a_pointer_to_the_backfill(
     verify, monkeypatch, tmp_path, capsys
 ):
