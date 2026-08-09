@@ -27,6 +27,9 @@ nothing** and its job is to put those two things in front of Jonny.
   - every written `dk_id` exists in `slate_players`
   - every written `player_id` exists in ops `dim_players`
   - no `REVIEW`/`AMBIGUOUS`/`NONE` name was written unless it was approved
+  - no `slate_players` `dk_id` appears under two names (the case the upsert
+    would otherwise resolve last-wins, silently)
+  - each name maps to one `player_id` across all its `dk_id`s
   - re-running the write changes no row count (idempotency)
   - the unmatched report accounts for exactly what wasn't written
 
@@ -58,7 +61,7 @@ from nba_dfs_stats_lab.ingest.crosswalk import (
     write_review_csv,
 )
 
-_failures: list[str] = []
+_failures: list[str] = []  # reset at the top of main(); see the note there
 
 
 def check(label: str, ok: bool, detail: str = "") -> bool:
@@ -88,8 +91,17 @@ def ops_gate(conn: sqlite3.Connection) -> None:
     taken on trust from a gate three phases ago.
     """
     print("\nOps DB (read-only ATTACH):")
-    count = conn.execute("SELECT COUNT(*) FROM ops.dim_players").fetchone()[0]
-    check("dim_players is readable and non-empty", count > 0, f"{count} players")
+    # `attach_ops` succeeds whenever the file opens, so a snapshot without
+    # `dim_players` gets this far. Every other failure here is a verdict; this
+    # one shouldn't be a traceback. Reported and carried on rather than
+    # returned, so the read-only probe below still runs — it is the check that
+    # matters most, and a snapshot missing a table is exactly when you want it.
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM ops.dim_players").fetchone()[0]
+    except sqlite3.OperationalError as exc:
+        check("dim_players is readable and non-empty", False, str(exc))
+    else:
+        check("dim_players is readable and non-empty", count > 0, f"{count} players")
 
     try:
         conn.execute("CREATE TABLE ops.__probe (x INTEGER)")
@@ -110,36 +122,57 @@ def ops_gate(conn: sqlite3.Connection) -> None:
 
 
 def collision_gate(conn: sqlite3.Connection) -> None:
-    """Normalization must not merge two distinct players on either side."""
+    """Normalization must not merge two distinct players on either side.
+
+    Both queries filter exactly as their `crosswalk.py` counterparts do
+    (`load_ops_players`, `load_slate_names`), so the gate sees the same names the
+    matcher does — and so one NULL name in a future ops snapshot turns into a
+    FAIL line rather than a `TypeError` out of `unicodedata.normalize`.
+
+    The ops side buckets `player_id`s, not name strings: two ops rows sharing a
+    `PLAYER_NAME` with different ids are two players the matcher cannot tell
+    apart, and bucketing by name would collapse them into one entry and pass.
+    That case is caught downstream as `Tier.AMBIGUOUS` so nothing is written
+    wrongly, but a check labelled "no two names collapse to one key" should
+    cover it rather than merely appear to.
+    """
     print("\nNormalization safety:")
-    for label, rows in (
-        (
-            "ops dim_players",
-            conn.execute("SELECT PLAYER_NAME FROM ops.dim_players").fetchall(),
-        ),
-        (
-            "slate_players",
-            conn.execute(
-                "SELECT DISTINCT name FROM slate_players WHERE name IS NOT NULL"
-            ).fetchall(),
-        ),
+
+    ops_buckets: dict[str, set[int]] = {}
+    ops_rows = conn.execute(
+        "SELECT PLAYER_ID, PLAYER_NAME FROM ops.dim_players WHERE PLAYER_NAME IS NOT NULL"
+    ).fetchall()
+    for player_id, name in ops_rows:
+        ops_buckets.setdefault(normalize_name(name), set()).add(int(player_id))
+
+    dk_buckets: dict[str, set[str]] = {}
+    dk_rows = conn.execute(
+        "SELECT DISTINCT TRIM(name) FROM slate_players "
+        "WHERE name IS NOT NULL AND TRIM(name) <> ''"
+    ).fetchall()
+    for (name,) in dk_rows:
+        dk_buckets.setdefault(normalize_name(name), set()).add(name)
+
+    for label, count, buckets in (
+        ("ops dim_players", len(ops_rows), ops_buckets),
+        ("slate_players", len(dk_rows), dk_buckets),
     ):
-        buckets: dict[str, set[str]] = {}
-        for (name,) in rows:
-            buckets.setdefault(normalize_name(name), set()).add(name)
         collisions = {k: v for k, v in buckets.items() if len(v) > 1}
         check(
             f"{label}: no two names collapse to one key",
             not collisions,
-            f"{len(rows)} names -> {len(buckets)} keys"
+            f"{count} names -> {len(buckets)} keys"
             + (f"; collisions: {list(collisions.items())[:3]}" if collisions else ""),
         )
 
 
 def match_gate(conn: sqlite3.Connection, report: MatchReport) -> None:
     print("\nMatching:")
+    # TRIM to agree with `load_slate_names`, which groups on the stripped name.
+    # Counting the raw column here would report two names for one match on a
+    # stray-whitespace duplicate, failing below with a misleading message.
     names = conn.execute(
-        "SELECT COUNT(DISTINCT name) FROM slate_players "
+        "SELECT COUNT(DISTINCT TRIM(name)) FROM slate_players "
         "WHERE name IS NOT NULL AND TRIM(name) <> ''"
     ).fetchone()[0]
     check(
@@ -247,13 +280,20 @@ def write_gate(
         else f"{len(written_names)} name(s) written",
     )
 
-    # One dk_id maps to one player: the PK guarantees it, so this catches a
-    # future writer that widens the table rather than a bug in this one.
-    dupes = conn.execute(
-        "SELECT COUNT(*) FROM (SELECT dk_id FROM dk_crosswalk GROUP BY dk_id HAVING COUNT(*) > 1)"
+    # Asking dk_crosswalk whether a dk_id appears twice is a tautology — dk_id is
+    # its PRIMARY KEY, so the answer is 0 however the write went. The question
+    # that actually bites is asked of the *source*: one dk_id under two names is
+    # two NameMatches, and before `write_crosswalk` learned to refuse it, the
+    # upsert resolved that last-wins with nothing logged. Zero on today's data.
+    two_named = conn.execute(
+        "SELECT COUNT(*) FROM (SELECT dk_id FROM slate_players "
+        "WHERE name IS NOT NULL AND TRIM(name) <> '' "
+        "GROUP BY dk_id HAVING COUNT(DISTINCT TRIM(name)) > 1)"
     ).fetchone()[0]
     check(
-        "each dk_id maps to exactly one player_id", dupes == 0, f"{dupes} duplicate(s)"
+        "no slate_players dk_id appears under two names",
+        two_named == 0,
+        f"{two_named} dk_id(s) with more than one name",
     )
 
     # A name must not map to two different ops players across its dk_ids.
@@ -289,6 +329,10 @@ def write_gate(
 
 
 def main(argv=None) -> int:
+    # `_failures` is module state. Jonny runs this once per process, but the
+    # tests call main() several times, and inheriting an earlier run's failures
+    # would make a clean run return 1 — and make the suite order-dependent.
+    _failures.clear()
     parser = argparse.ArgumentParser(description="Phase 5 crosswalk gate.")
     parser.add_argument(
         "--review", metavar="PATH", help="export the review queue to a CSV"

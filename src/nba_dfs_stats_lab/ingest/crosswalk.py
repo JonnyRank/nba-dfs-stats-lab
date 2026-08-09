@@ -14,13 +14,14 @@ Two facts about the data shape this module:
    straight from `slate_players` on `dk_id`, as its pinned DDL intends.
 
 2. **Fuzzy matches are never written without approval.** On the real data the
-   one true fuzzy match (`Yanic Niederhauser` → `Yanic Konan Niederhauser`)
-   scores 0.93 while the best *false* candidate (`RJ Davis` → `JD Davison`)
-   scores 0.39 — a wide gap, but a gap between two handfuls of names, not a law.
-   `RJ Davis`/`JD Davison` and `Cameron Matthews`/`Garrison Mathews` are exactly
-   the pairs a threshold would eventually get wrong, and a wrong crosswalk row
-   silently mis-attributes every box score for that player. Only the two
-   deterministic tiers auto-approve; everything else goes to Jonny.
+   true fuzzy matches score 0.93 (`Yanic Niederhauser` → `Yanic Konan
+   Niederhauser`) and 0.80 (`Hansen Yang` → `Yang Hansen`), while the best
+   *false* candidate — `RJ Davis` → `Ed Davis` — scores 0.73. That is a gap
+   between two handfuls of names, not a law: `RJ Davis`/`Ed Davis` and
+   `Cameron Matthews`/`Wesley Matthews` (0.67) are exactly the pairs a
+   threshold would eventually get wrong, and a wrong crosswalk row silently
+   mis-attributes every box score for that player. Only the two deterministic
+   tiers auto-approve; everything else goes to Jonny.
 
 The four-method ingest shape doesn't apply here — there is no CSV and no slate
 grain. The pipeline is `match_players()` → review → `write_crosswalk()`.
@@ -176,8 +177,13 @@ class MatchReport:
 
 def load_ops_players(conn: sqlite3.Connection, alias: str = "ops") -> list[OpsPlayer]:
     """Read `dim_players` through an already-attached read-only ops connection."""
+    # `alias` is interpolated, so it is checked here rather than relying on the
+    # caller having gone through `attach_ops` — this function's parameter is
+    # independent of the one that validated.
+    if not alias.isidentifier():
+        raise ValueError(f"invalid attach alias: {alias!r}")
     rows = conn.execute(
-        f"SELECT PLAYER_ID, PLAYER_NAME FROM {alias}.dim_players "  # noqa: S608 — alias is checked by attach_ops
+        f"SELECT PLAYER_ID, PLAYER_NAME FROM {alias}.dim_players "  # noqa: S608 — alias checked above
         "WHERE PLAYER_NAME IS NOT NULL"
     ).fetchall()
     return [OpsPlayer(int(pid), name, normalize_name(name)) for pid, name in rows]
@@ -188,6 +194,12 @@ def load_slate_names(conn: sqlite3.Connection) -> list[NameMatch]:
 
     Grouped by the raw name, not the normalized one: two spellings of the same
     player are two decisions to make and should be seen as two lines.
+
+    The one liberty taken with the raw string is `TRIM`: `"LeBron James "` and
+    `"LeBron James"` are one decision, not two. `unmatched_report`, `coverage`
+    and the gate's name count all group on `TRIM(name)` for the same reason —
+    if they disagreed, a stray-whitespace name would be one match here and two
+    names there, failing the gate with a message pointing nowhere near the cause.
     """
     rows = conn.execute(
         "SELECT name, dk_id, slate_id FROM slate_players "
@@ -252,31 +264,29 @@ def score_candidate(dk_normalized: str, ops_normalized: str) -> tuple[float, str
     return score, reason
 
 
-def _candidates(dk_normalized: str, ops: Sequence[OpsPlayer]) -> list[Candidate]:
-    scored = []
-    for player in ops:
-        score, reason = score_candidate(dk_normalized, player.normalized)
-        if score >= REVIEW_FLOOR:
-            scored.append(Candidate(player.player_id, player.name, score, reason))
-    scored.sort(key=lambda c: (-c.score, c.ops_name))
-    return scored[:_MAX_CANDIDATES]
-
-
-def _best_effort_candidate(
+def _score_all(
     dk_normalized: str, ops: Sequence[OpsPlayer]
-) -> tuple[Candidate, ...]:
-    """The single closest ops player regardless of the floor.
+) -> tuple[list[Candidate], Candidate | None]:
+    """Score every ops player once, returning `(above the floor, single best)`.
 
-    Attached to unmatched names so the report shows *what* the nearest thing was.
-    A name with no candidate at all is the honest answer for a rookie the ops DB
-    has never seen; showing the near miss is what makes that judgeable.
+    Both halves come out of one pass because the sub-floor case needs the best
+    candidate too: a name with nothing above `REVIEW_FLOOR` is reported as
+    unmatched *with its nearest miss*, which is what keeps a real match below
+    the floor visible rather than silently dropped (that is how `Hansen Yang`
+    was found). Scoring twice — once to filter, once to find the max — would
+    double the `SequenceMatcher` work on exactly the slowest path.
     """
+    scored: list[Candidate] = []
     best: Candidate | None = None
     for player in ops:
         score, reason = score_candidate(dk_normalized, player.normalized)
+        candidate = Candidate(player.player_id, player.name, score, reason)
         if best is None or score > best.score:
-            best = Candidate(player.player_id, player.name, score, reason)
-    return (best,) if best is not None else ()
+            best = candidate
+        if score >= REVIEW_FLOOR:
+            scored.append(candidate)
+    scored.sort(key=lambda c: (-c.score, c.ops_name))
+    return scored[:_MAX_CANDIDATES], best
 
 
 def match_players(conn: sqlite3.Connection, alias: str = "ops") -> MatchReport:
@@ -291,7 +301,12 @@ def match_players(conn: sqlite3.Connection, alias: str = "ops") -> MatchReport:
     by_normalized: dict[str, list[OpsPlayer]] = {}
     for player in ops:
         by_raw.setdefault(player.name, []).append(player)
-        by_normalized.setdefault(player.normalized, []).append(player)
+        # A name that is nothing but a suffix normalizes to "" (pinned by
+        # `test_a_pure_suffix_name_normalizes_to_empty`). Indexing that key would
+        # let two unrelated players meet under it and auto-write a NORMALIZED
+        # row without review — the one thing this module exists to prevent.
+        if player.normalized:
+            by_normalized.setdefault(player.normalized, []).append(player)
 
     for match in matches:
         normalized = normalize_name(match.name)
@@ -299,7 +314,7 @@ def match_players(conn: sqlite3.Connection, alias: str = "ops") -> MatchReport:
         # evidence available and shouldn't be relabelled by a later tier.
         for tier, bucket in (
             (Tier.EXACT, by_raw.get(match.name)),
-            (Tier.NORMALIZED, by_normalized.get(normalized)),
+            (Tier.NORMALIZED, by_normalized.get(normalized) if normalized else None),
         ):
             if not bucket:
                 continue
@@ -325,7 +340,7 @@ def match_players(conn: sqlite3.Connection, alias: str = "ops") -> MatchReport:
             )
             break
         else:
-            candidates = _candidates(normalized, ops)
+            candidates, nearest = _score_all(normalized, ops)
             if candidates:
                 match.tier = Tier.REVIEW
                 match.candidates = tuple(candidates)
@@ -333,9 +348,11 @@ def match_players(conn: sqlite3.Connection, alias: str = "ops") -> MatchReport:
                 # Deliberately not set: `player_id` stays None until approved, so
                 # nothing downstream can mistake a proposal for a decision.
             else:
+                # The nearest miss rides along for context only — `apply_approvals`
+                # refuses to write a NONE-tier name, so it can't be approved.
                 match.tier = Tier.NONE
-                match.candidates = _best_effort_candidate(normalized, ops)
-                match.score = match.candidates[0].score if match.candidates else 0.0
+                match.candidates = (nearest,) if nearest is not None else ()
+                match.score = nearest.score if nearest is not None else 0.0
 
     return MatchReport(matches=matches, ops_player_count=len(ops))
 
@@ -447,9 +464,16 @@ def read_approvals(path: Path) -> dict[str, int]:
 def apply_approvals(report: MatchReport, approved: dict[str, int]) -> list[NameMatch]:
     """Resolve approved names against the report. Returns the matches to write.
 
-    Validates that each approved name exists and that the approved `player_id`
-    was one of the candidates actually offered — a hand-typed id that was never
-    proposed is a typo, not a decision.
+    Validates that each approved name was actually *in the review queue* and
+    that the approved `player_id` was one of the candidates offered for it — a
+    hand-typed id that was never proposed is a typo, not a decision.
+
+    The tier check is not redundant with the candidate check. A `Tier.NONE` name
+    also carries a candidate: the sub-floor near miss `_score_all` attaches so
+    the report can show what the nearest thing was. That one is there to be
+    *read*, not chosen — `write_review_csv` exports `needs_review` only, so it
+    was never offered — and quietly doubling it as an approvable option is the
+    one place the "expensive to be wrong" argument would stop applying.
     """
     by_name = {m.name: m for m in report.matches}
     unknown = sorted(set(approved) - set(by_name))
@@ -462,6 +486,11 @@ def apply_approvals(report: MatchReport, approved: dict[str, int]) -> list[NameM
     off_menu: list[str] = []
     for name, player_id in approved.items():
         match = by_name[name]
+        if match.tier not in (Tier.REVIEW, Tier.AMBIGUOUS):
+            off_menu.append(
+                f"{name!r} was never in the review queue (tier {match.tier.value})"
+            )
+            continue
         offered = {c.player_id for c in match.candidates}
         if player_id not in offered:
             off_menu.append(f"{name!r} -> {player_id} (offered: {sorted(offered)})")
@@ -483,7 +512,7 @@ def apply_approvals(report: MatchReport, approved: dict[str, int]) -> list[NameM
         )
     if off_menu:
         raise ApprovalError(
-            f"{len(off_menu)} approved id(s) were never offered: {off_menu}"
+            f"{len(off_menu)} approval(s) were never offered for review: {off_menu}"
         )
     return resolved
 
@@ -500,12 +529,31 @@ def write_crosswalk(conn: sqlite3.Connection, matches: Iterable[NameMatch]) -> i
     explicit way to clear. Re-applying the same batch is a no-op.
 
     Refuses a match with no `player_id`: a proposal is not a decision.
+
+    Also refuses a `dk_id` claimed by two different players in one batch.
+    `slate_players` is keyed `(slate_id, dk_id)`, so the schema permits one
+    `dk_id` to appear under two names — and `load_slate_names` groups by name,
+    so those two names are two `NameMatch`es. Today every `dk_id` in the data is
+    distinct, but the DK rename that produced two spellings for Yanic
+    Niederhauser is proof the two-names case is real rather than hypothetical.
+    Left alone, `ON CONFLICT DO UPDATE` would silently apply whichever row
+    `executemany` reached last — the same silent mis-attribution the rest of
+    this module goes to some lengths to prevent. Refuse the batch instead.
     """
     rows: list[tuple[int, int, str]] = []
+    claimed: dict[int, tuple[int, str]] = {}
     for match in matches:
         if match.player_id is None:
             raise ValueError(f"refusing to write unresolved match for {match.name!r}")
-        rows.extend((dk_id, match.player_id, match.name) for dk_id in match.dk_ids)
+        for dk_id in match.dk_ids:
+            owner = claimed.setdefault(dk_id, (match.player_id, match.name))
+            if owner[0] != match.player_id:
+                raise ValueError(
+                    f"dk_id {dk_id} is claimed by two players: "
+                    f"{owner[0]} (as {owner[1]!r}) and "
+                    f"{match.player_id} (as {match.name!r}) — refusing to guess"
+                )
+            rows.append((dk_id, match.player_id, match.name))
     if not rows:
         return 0
     with conn:
@@ -542,21 +590,29 @@ def unmatched_report(conn: sqlite3.Connection) -> list[UnmatchedRow]:
 
     The standing monitor the plan calls for: run it after each new slate and a
     rookie who has just entered the league shows up as a new line. Grouped by
-    name rather than listed per `dk_id`, since one new player would otherwise
-    appear once per slate they've played.
+    `TRIM(name)`, matching `load_slate_names` and `coverage`, rather than listed
+    per `dk_id` — one new player would otherwise appear once per slate played.
+
+    A name is listed when *any* of its `dk_id`s lacks a row, while `coverage`
+    counts it as covered when *any* of them has one, so a **partially** mapped
+    name is both covered and unmatched at once. That is not reachable straight
+    after a write, but it is exactly what a new slate creates: ingest a slate
+    that issues a fresh `dk_id` for an already-approved name, then re-run
+    `--write` without `--apply`, and the new id has no row while the old ones
+    do. Re-run with `--apply` to settle it.
     """
     rows = conn.execute(
         """
-        SELECT sp.name,
+        SELECT TRIM(sp.name),
                COUNT(DISTINCT sp.dk_id),
                COUNT(DISTINCT sp.slate_id),
                MIN(sp.slate_id),
                MAX(sp.slate_id)
           FROM slate_players sp
           LEFT JOIN dk_crosswalk x ON x.dk_id = sp.dk_id
-         WHERE x.dk_id IS NULL AND sp.name IS NOT NULL
-         GROUP BY sp.name
-         ORDER BY COUNT(DISTINCT sp.dk_id) DESC, sp.name
+         WHERE x.dk_id IS NULL AND sp.name IS NOT NULL AND TRIM(sp.name) <> ''
+         GROUP BY TRIM(sp.name)
+         ORDER BY COUNT(DISTINCT sp.dk_id) DESC, TRIM(sp.name)
         """
     ).fetchall()
     return [
@@ -566,17 +622,23 @@ def unmatched_report(conn: sqlite3.Connection) -> list[UnmatchedRow]:
 
 
 def coverage(conn: sqlite3.Connection) -> dict[str, int]:
-    """Row-level crosswalk coverage of `slate_players`, for the gate and the CLI."""
+    """Row-level crosswalk coverage of `slate_players`, for the gate and the CLI.
+
+    Names are grouped on `TRIM(name)` to agree with `load_slate_names` and
+    `unmatched_report`; see the partial-coverage note on the latter.
+    """
     total, covered = conn.execute(
         "SELECT COUNT(*), COUNT(x.dk_id) FROM slate_players sp "
         "LEFT JOIN dk_crosswalk x ON x.dk_id = sp.dk_id"
     ).fetchone()
     names_total, names_covered = conn.execute(
         "SELECT COUNT(*), SUM(matched) FROM ("
-        "  SELECT sp.name, MAX(CASE WHEN x.dk_id IS NULL THEN 0 ELSE 1 END) AS matched"
+        "  SELECT TRIM(sp.name),"
+        "         MAX(CASE WHEN x.dk_id IS NULL THEN 0 ELSE 1 END) AS matched"
         "    FROM slate_players sp"
         "    LEFT JOIN dk_crosswalk x ON x.dk_id = sp.dk_id"
-        "   GROUP BY sp.name)"
+        "   WHERE sp.name IS NOT NULL AND TRIM(sp.name) <> ''"
+        "   GROUP BY TRIM(sp.name))"
     ).fetchone()
     return {
         "slate_player_rows": total,

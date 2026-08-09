@@ -10,6 +10,7 @@ means a future change to `score_candidate` has to keep clearing them.
 """
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -60,7 +61,9 @@ def conn(tmp_path):
 
     conn = sqlite3.connect(tmp_path / "analytics.db", uri=True)
     init_db(conn)
-    conn.execute("ATTACH DATABASE ? AS ops", (f"{ops_path.as_posix()}",))
+    conn.execute(
+        "ATTACH DATABASE ? AS ops", (f"file:{ops_path.as_posix()}?mode=ro",)
+    )
     yield conn
     conn.close()
 
@@ -208,7 +211,9 @@ def colliding_conn(tmp_path):
 
     conn = sqlite3.connect(tmp_path / "a.db", uri=True)
     init_db(conn)
-    conn.execute("ATTACH DATABASE ? AS ops", (f"{ops_path.as_posix()}",))
+    conn.execute(
+        "ATTACH DATABASE ? AS ops", (f"file:{ops_path.as_posix()}?mode=ro",)
+    )
     yield conn
     conn.close()
 
@@ -253,11 +258,41 @@ def test_duplicate_ops_names_are_ambiguous_at_the_exact_tier(tmp_path):
 
     conn = sqlite3.connect(tmp_path / "a.db", uri=True)
     init_db(conn)
-    conn.execute("ATTACH DATABASE ? AS ops", (f"{ops_path.as_posix()}",))
+    conn.execute(
+        "ATTACH DATABASE ? AS ops", (f"file:{ops_path.as_posix()}?mode=ro",)
+    )
     add_players(conn, [("s1", 1, "Bob Smith")])
 
     match = match_players(conn).matches[0]
     assert match.tier is Tier.AMBIGUOUS
+    assert match.player_id is None
+    conn.close()
+
+
+def test_an_empty_normalized_key_never_auto_matches(tmp_path):
+    """`normalize_name` returns "" for a pure-suffix name. If that key were
+    indexed, any other name normalizing to "" would meet it there and auto-write
+    a NORMALIZED row between two unrelated players — without review, which is
+    the one outcome the tiering exists to make impossible."""
+    ops_path = tmp_path / "ops.db"
+    ops = sqlite3.connect(ops_path)
+    ops.execute(
+        "CREATE TABLE dim_players (PLAYER_ID INTEGER PRIMARY KEY, PLAYER_NAME TEXT)"
+    )
+    ops.executemany("INSERT INTO dim_players VALUES (?, ?)", [(1, "III")])
+    ops.commit()
+    ops.close()
+
+    conn = sqlite3.connect(tmp_path / "a.db", uri=True)
+    init_db(conn)
+    conn.execute(
+        "ATTACH DATABASE ? AS ops", (f"file:{ops_path.as_posix()}?mode=ro",)
+    )
+    add_players(conn, [("s1", 1, "Jr.")])
+
+    match = match_players(conn).matches[0]
+    assert normalize_name("Jr.") == normalize_name("III") == ""
+    assert match.tier is not Tier.NORMALIZED
     assert match.player_id is None
     conn.close()
 
@@ -389,6 +424,25 @@ def test_approving_an_unknown_name_is_rejected(conn):
         apply_approvals(report, {"Nobody At All": 2544})
 
 
+def test_a_sub_floor_near_miss_cannot_be_approved(conn):
+    """The nearest candidate on an unmatched name is context, not a menu item.
+
+    `write_review_csv` exports `needs_review` only, so a NONE-tier name was
+    never offered — but it still carries the near miss `_score_all` attached for
+    the report. Approving that would write a sub-floor guess with nothing
+    flagging it, since the leak check whitelists approved names.
+    """
+    add_players(conn, [("s1", 1, "Completely Different")])
+    report = match_players(conn)
+    match = report.matches[0]
+    assert match.tier is Tier.NONE
+    assert match.candidates and match.candidates[0].score < REVIEW_FLOOR
+
+    near_miss = match.candidates[0].player_id
+    with pytest.raises(ApprovalError, match="never in the review queue"):
+        apply_approvals(report, {"Completely Different": near_miss})
+
+
 # --- writing ------------------------------------------------------------------
 
 
@@ -433,6 +487,46 @@ def test_write_crosswalk_refuses_an_unresolved_match(conn):
     with pytest.raises(ValueError, match="refusing to write unresolved"):
         write_crosswalk(conn, [unresolved])
     assert conn.execute("SELECT COUNT(*) FROM dk_crosswalk").fetchone()[0] == 0
+
+
+def test_write_crosswalk_refuses_a_dk_id_claimed_by_two_players(conn):
+    """`slate_players` is keyed (slate_id, dk_id), so one dk_id can carry two
+    names — and two names are two NameMatches. The upsert would resolve that
+    last-wins with nothing logged, which is the silent mis-attribution the whole
+    module is built to prevent. It has to refuse instead."""
+    contested = [
+        NameMatch(name="LeBron James", tier=Tier.EXACT, dk_ids=(7,), player_id=2544),
+        NameMatch(name="Luka Doncic", tier=Tier.EXACT, dk_ids=(7,), player_id=1629029),
+    ]
+    with pytest.raises(ValueError, match="claimed by two players"):
+        write_crosswalk(conn, contested)
+    assert conn.execute("SELECT COUNT(*) FROM dk_crosswalk").fetchone()[0] == 0
+
+
+def test_write_crosswalk_allows_two_names_for_one_player(conn):
+    """The legitimate direction: DK renamed Yanic Niederhauser mid-season, so two
+    spellings map to one ops player. That stitches his October slates onto the
+    rest of the season and must keep working."""
+    written = write_crosswalk(
+        conn,
+        [
+            NameMatch(
+                name="Yanic Niederhauser",
+                tier=Tier.REVIEW,
+                dk_ids=(1, 2),
+                player_id=1642949,
+            ),
+            NameMatch(
+                name="Yanic Konan Niederhauser",
+                tier=Tier.EXACT,
+                dk_ids=(3,),
+                player_id=1642949,
+            ),
+        ],
+    )
+    assert written == 3
+    rows = conn.execute("SELECT DISTINCT player_id FROM dk_crosswalk").fetchall()
+    assert rows == [(1642949,)]
 
 
 def test_write_crosswalk_corrects_a_previous_mapping(conn):
@@ -502,3 +596,36 @@ def test_coverage_on_an_empty_db(conn):
         "names_covered": 0,
         "crosswalk_rows": 0,
     }
+
+
+# --- the tracked approvals file -----------------------------------------------
+#
+# `docs/crosswalk-approvals.csv` is the only non-reproducible input in the
+# project: everything else rebuilds from source CSVs and code, and the docs
+# actively tell you to delete analytics.db and re-ingest. Nothing else in the
+# suite touches it, so a change to `score_candidate` or `REVIEW_FLOOR` that
+# stopped offering one of these ids would turn the documented rebuild command
+# into an ApprovalError — discovered on Jonny's machine, at gate time, phases
+# later. These two tests move that failure into CI.
+
+APPROVALS = Path(__file__).parents[1] / "docs" / "crosswalk-approvals.csv"
+
+# The two names Jonny approved on 2026-08-09, and the ops ids he approved them to.
+APPROVED = {"Yanic Niederhauser": 1642949, "Hansen Yang": 1642905}
+
+
+def test_the_tracked_approvals_still_parse():
+    assert read_approvals(APPROVALS) == APPROVED
+
+
+def test_every_approved_id_is_still_offered_as_a_candidate(conn):
+    """The half that actually catches a scoring regression: parsing proves the
+    file is well-formed, but `apply_approvals` also requires each id to still be
+    among the candidates the matcher proposes for that name."""
+    add_players(
+        conn,
+        [("s1", i, name) for i, name in enumerate(APPROVED, start=1)],
+    )
+    report = match_players(conn)
+    resolved = apply_approvals(report, read_approvals(APPROVALS))
+    assert {m.name: m.player_id for m in resolved} == APPROVED
