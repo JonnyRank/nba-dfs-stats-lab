@@ -27,6 +27,7 @@ docs/*.local.md
 
 # MCP Server config files
 .devdbrc
+dbhub.toml
 
 # Secrets
 .env
