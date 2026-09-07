@@ -24,9 +24,12 @@ from nba_dfs_stats_lab.ingest.reconcile import (
     build_game_index,
     load_ops_points,
     load_prior_audit,
+    _num,
     off_slate_games,
     off_slate_sides,
     ops_window,
+    print_report,
+    print_write_preview,
     reconcile,
     resolve_game_dates,
     slate_game_sides,
@@ -625,3 +628,42 @@ def test_a_hand_fix_that_lands_on_the_ops_value_keeps_the_stale_dk_value(conn):
     conn.execute("DELETE FROM fpts_audit WHERE slate_id = ?", (MAIN,))
     repinned = next(r for r in reconcile(conn).rows if r.dk_id == 3)
     assert (repinned.dk_value, repinned.action, repinned.reason) == (52.0, "unchanged", None)
+
+
+def test_a_null_actual_fpts_does_not_crash_either_report(conn):
+    # `actual_fpts` is nullable in the schema. A NULL one is classifiable — ops
+    # has a value, DK doesn't — so it reaches the report as a `corrected` row
+    # whose dk_value and delta are both None. Formatting those with a float
+    # spec used to raise TypeError and replace the whole report with a stack
+    # trace, on the very path Jonny reads before deciding to write.
+    # (PR #11 review, CodeRabbit.)
+    conn.execute("UPDATE slate_players SET actual_fpts = NULL WHERE dk_id = 3")
+    report = reconcile(conn)
+
+    row = next(r for r in report.rows if r.dk_id == 3)
+    assert (row.dk_value, row.delta, row.action) == (None, None, "corrected")
+
+    print_report(report)  # must not raise
+    print_write_preview(report, "cmd")  # nor this
+
+
+def test_the_nullable_formatter_keeps_its_column_width():
+    assert _num(52.0) == " 52.00"
+    assert _num(None) == "   n/a"  # same width, so the column still lines up
+    assert _num(-2.0, "+.2f") == "-2.00"
+    assert _num(None, "+.2f") == "n/a"
+
+
+def test_a_null_actual_fpts_is_filled_from_ops_and_leaves_no_null(conn):
+    # The correction removes a NULL rather than introducing one, so D2 holds.
+    conn.execute("UPDATE slate_players SET actual_fpts = NULL WHERE dk_id = 3")
+    report = reconcile(conn)
+    write_audit(conn, report.rows)
+    apply_corrections(conn, report.rows)
+
+    assert conn.execute(
+        "SELECT actual_fpts FROM slate_players WHERE dk_id = 3"
+    ).fetchone()[0] == 52.0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM slate_players WHERE actual_fpts IS NULL"
+    ).fetchone()[0] == 0

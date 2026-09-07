@@ -726,6 +726,29 @@ def audit_rollup(conn: sqlite3.Connection) -> dict[str, list[tuple]]:
 _MAX_LISTED = 25
 
 
+def _num(value: float | None, spec: str = ">6.2f", missing: str = "n/a") -> str:
+    """Format a nullable number without replacing the report with a traceback.
+
+    `slate_players.actual_fpts` is nullable in the schema. It is 100% non-null
+    today and D2 keeps it that way, but a NULL one is *classifiable* — it
+    reaches `_classify` as `corrected`/`stat_correction`, since ops has a value
+    and the DK file doesn't — and both its `dk_value` and its `delta` are then
+    `None`. Formatting those with a float spec raises `TypeError` and takes the
+    whole report down with it (PR #11 review, CodeRabbit).
+
+    That matters more than the odds of hitting it: this is the reporting path,
+    the one Jonny reads before deciding whether to write, and everywhere else
+    in this project an unexpected state is a printed verdict rather than a
+    stack trace.
+    """
+    if value is not None:
+        return f"{value:{spec}}"
+    # Keep the column width so a missing value doesn't break the alignment.
+    # Sign and precision don't apply to text, so drop them.
+    width = spec.split(".")[0].lstrip("+- ")
+    return f"{missing:{width}}" if width else missing
+
+
 def print_report(report: ReconcileReport) -> None:
     """The headline: what would change, and why, before anything is written."""
     actions = report.action_counts()
@@ -775,7 +798,7 @@ def print_report(report: ReconcileReport) -> None:
         for row in sorted(unscored, key=lambda r: -(r.ops_value or 0))[:_MAX_LISTED]:
             print(
                 f"    {row.slate_id}  {(row.name or '?'):<24} "
-                f"  0.00 -> {row.ops_value:>6.2f}"
+                f"  0.00 -> {_num(row.ops_value)}"
             )
         if len(unscored) > _MAX_LISTED:
             print(f"    ... and {len(unscored) - _MAX_LISTED} more")
@@ -786,7 +809,8 @@ def print_report(report: ReconcileReport) -> None:
         for row in sorted(corrections, key=lambda r: -abs(r.delta or 0))[:_MAX_LISTED]:
             print(
                 f"    {row.slate_id}  {(row.name or '?'):<24} "
-                f"{row.dk_value:>6.2f} -> {row.ops_value:>6.2f}  ({row.delta:+.2f})"
+                f"{_num(row.dk_value)} -> {_num(row.ops_value)}  "
+                f"({_num(row.delta, '+.2f')})"
             )
         if len(corrections) > _MAX_LISTED:
             print(f"    ... and {len(corrections) - _MAX_LISTED} more")
@@ -818,7 +842,7 @@ def print_write_preview(report: ReconcileReport, command: str) -> None:
         gained = sum(r.delta or 0 for r in corrections)
         biggest = max(corrections, key=lambda r: abs(r.delta or 0))
         print(f"       net change {gained:+.2f} fantasy points across the DB; "
-              f"largest single move {biggest.delta:+.2f} "
+              f"largest single move {_num(biggest.delta, '+.2f')} "
               f"({biggest.name or biggest.dk_id} on {biggest.slate_id})")
 
     print(f"\n  2. INSERT {len(report.rows)} fpts_audit row(s) — a full census, one per "
