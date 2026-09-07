@@ -1,6 +1,7 @@
 # Phase 6 — Ops reconciliation
 
-**Status:** planned, approved 2026-08-09. No code written, no rows changed.
+**Status:** **built 2026-09-07.** Approved 2026-08-09; see §5 *As built* for the
+three places the implementation departs from what §1-§3 pinned, and why.
 **Depends on:** Phase 5 (`dk_crosswalk`, 51,734 rows).
 **Goal:** bring `slate_players.actual_fpts` into line with the ops box scores, with
 ops as the single source of truth.
@@ -166,6 +167,20 @@ Jonny's read, and it's the right one: **DK ran a genuine two-calendar-day slate*
 during the conference finals. Neither source is wrong. So the ±1 resolution is
 the correct model of the data, not a workaround for a defect.
 
+> **Amended 2026-09-07 (build):** it is **ten** such slates, not one. The
+> conference finals ran two series on alternating nights and DK listed **both**
+> on every slate file, so exactly one of the two games always falls on the next
+> calendar day. `2026-05-12` (CLE/DET), `2026-05-17` (OKC/SAS), and every slate
+> from `05-18` through `05-25` — 10 slate dates, **20 game-sides**, all resolving
+> at +1, and all 214 rescued rows are inside them. Nothing about the design
+> changes: game-level ±1 handles ten exactly as it handles one, and the
+> resolution counts below (2,284 same-day) already included them.
+
+> **+1 must be tried before -1, and the build pins that.** On the `05-21` slate
+> OKC/SAS exists in ops at *both* 05-20 and 05-22. A slate can only carry a game
+> that has yet to tip off, so the later one is the right answer; trying -1 first
+> would attribute Game 3's box scores to Game 4's slate.
+
 > ### ⚠ The trap — why this must resolve at game level, not player level
 > **907 of the 19,790 zero rows also have an ops log at +1 day** — players who
 > simply played the next night. A blanket per-player ±1 window would write the
@@ -268,6 +283,11 @@ doesn't justify a third package.
 
 ### 3.2 Schema
 
+> **Amended 2026-09-07 (build):** `fpts_audit` gained an **`off_slate INTEGER
+> NOT NULL DEFAULT 0`** column, and the reason counts in the table below moved
+> with it. The DDL and the census as built are in §5.1; the reasoning is §5.2.
+> The nine columns below are otherwise exactly as shipped.
+
 ```sql
 CREATE TABLE IF NOT EXISTS fpts_audit (
   slate_id   TEXT    NOT NULL,
@@ -358,6 +378,11 @@ uv run python -m nba_dfs_stats_lab.ingest.reconcile --audit      # print the sta
 ```
 
 ### 3.6 The gate — `scripts/verify_phase6.py`
+
+> **Amended 2026-09-07 (build):** shipped with **27 checks**, not 14 — the 15
+> below plus the write-stage and idempotency checks they imply, each split so a
+> failure names one thing. Checks 12 and 15 changed shape with `off_slate`; the
+> as-built list and the revised expected counts are in §5.3.
 
 Two stages like Phase 5: report-only first so the change list is in front of
 Jonny before anything writes, then `--write` and re-check against the DB.
@@ -527,3 +552,126 @@ SELECT COUNT(*),
        SUM(EXISTS(SELECT 1 FROM og WHERE og.d=date(g.d,'-1 day') AND og.t=g.team AND og.o=g.opp))
   FROM g;
 ```
+
+
+---
+
+## 5. As built (2026-09-07)
+
+Everything in §1 re-derived exactly against the same two snapshots before a line
+was written — 51,971 | 237 | 20,004 | 30,800 | 930, causes 680 / 109 / 61 / 80,
+game-sides 2,306 | 2,284 | 30 | 32. Three things then changed, two of them
+because the data said so and one because a test caught a bug.
+
+### 5.1 `off_slate` is a column, not a `reason` value
+
+**The problem.** `reason` is a single column, and §1.3 asked it to carry two
+orthogonal facts at once: all 209 off-slate rows tagged `off_slate` (D3, check
+12) *and* the 36 DAL/MIL rows reading `no_ops_game` (§1.3, §3.2). A third
+collision turned up during the build: **Alex Toohey** (GSW, `2025-10-28`) is
+inside an off-slate game *and* one of the 11 uncrosswalked names, so his row
+wants `no_crosswalk` too. That is why a detector reading `reason` alone counts
+208 where D3 says 209.
+
+**The fix** (Jonny, 2026-09-07): `fpts_audit.off_slate INTEGER NOT NULL DEFAULT
+0`. Off-slate is a property of the **game**; `reason` stays one primary cause per
+row. The flag carries the whole population — a backtest excludes it with
+`WHERE off_slate = 1` — and the three rows where the two disagree keep their
+narrower cause.
+
+| | Rows |
+|---|---|
+| `off_slate = 1` | **209** — 109 `corrected`, 5 `unchanged`, 94 `no_ops_row`, 1 `unmapped` |
+| of which `reason = 'off_slate'` | 172 |
+| `reason = 'no_ops_game'` (DAL/MIL) | 36 |
+| `reason = 'no_crosswalk'` (Toohey) | 1 |
+
+Reason precedence, in order: `no_crosswalk` → `no_ops_game` → `off_slate` → the
+value causes / `date_shift` / `dnp`. `off_slate` sits above the value causes so
+the 109 corrections on games DK never scored keep a cause of their own rather
+than collapsing into `dk_unscored` — which is *true* of them but would hide the
+game-level fact and make the off-slate corrections unfindable by reason.
+
+### 5.2 `date_shift` corrects nothing — it marks where a value came from
+
+§3.2 pinned `date_shift` as **214 `corrected`** rows. It is not: those 214 rows
+*already agree* with ops once the right date is used. The shift repairs
+`game_date`, not the value.
+
+The 20 shifted game-sides hold 359 `slate_players` rows: **232** crosswalked rows
+that match ops exactly, **122** DNPs with no ops log, **5** uncrosswalked, and
+**0** corrections. So (Jonny, 2026-09-07) `reason = 'date_shift'` marks the **232
+rows that actually took a value from a shifted date**, all of them
+`action = 'unchanged'`. The 122 DNPs read `dnp`; their shift is still visible in
+`game_date`, which is why the gate reports **354** rows on a shifted `game_date`
+(232 + 122) rather than 359 — the 5 uncrosswalked rows never get one. A shifted
+row that also needed a correction would take the value cause, since that is the
+actionable half — none exist today.
+
+### 5.3 The census as built, and the two checks that fail on new data
+
+| `action` | Rows | | `reason` | Rows | Usual `action` |
+|---|---|---|---|---|---|
+| `corrected` | 930 | | *(none)* | 30,795 | `unchanged` |
+| `unchanged` | 31,032 | | `dnp` | 19,678 | `no_ops_row` |
+| `no_ops_row` | 19,772 | | `float_noise` | 680 | `corrected` |
+| `unmapped` | 237 | | `no_crosswalk` | 237 | `unmapped` |
+| **total** | **51,971** | | `date_shift` | 232 | `unchanged` |
+| | | | `off_slate` | 172 | 109 `corrected`, 5 `unchanged`, 58 `no_ops_row` |
+| | | | `stat_correction` | 80 | `corrected` |
+| | | | `dk_unscored` | 61 | `corrected` |
+| | | | `no_ops_game` | 36 | `no_ops_row` |
+
+§3.6's estimate of ~1,144 `corrected` / ~30,800 `unchanged` counted the 214
+date-shifted rows as corrections. They are not, so they sit in `unchanged`
+instead: 930 and 31,032. The three-way split of the 20,004 rows with no ops log
+on the *slate* date is 19,772 still without one plus the 232 the shift rescued.
+
+`EXPECTED_ACTIONS`, `EXPECTED_REASONS` and the two `EXPECTED_OFF_SLATE_*`
+constants in `scripts/verify_phase6.py` pin these. They are the checks that fail
+on **new data** rather than on a code defect — a new slate or a refreshed ops
+snapshot moves them. That is a prompt to look, not a bug: re-derive with
+[Appendix A](#appendix-a--reproduce), and if the new rows fall into an existing
+class, re-pin the constants.
+
+The gate ships **27 checks**: 15 in the report-only stage, 11 more after
+`--write`, and one comparing every ops table's row count to what it was at
+startup. Every one can FAIL on some data — `tests/test_verify_phase6.py` proves
+it for the censuses, the ops dependency, the correction/over-reach pair, the
+no-NULL rule and the split-matchup trap by injecting each failure and asserting
+the FAIL line.
+
+### 5.4 The bug the idempotency test found: off-slate detection ate itself
+
+Worth recording, because it is the sharpest instance of the §3.4 problem and
+nothing in the survey predicted it.
+
+The off-slate signature is *"every rostered player on both sides of a matchup at
+exactly 0"* — and `apply_corrections` overwrites precisely those zeros. Read from
+the live `slate_players.actual_fpts`, the detector finds the six games on the
+first pass and **nothing** on the second: `off_slate` silently drops from all 209
+rows, and with it the one thing that makes them excludable from a backtest.
+Nothing would have flagged it — the second run passes every other check.
+
+The fix is the same rule `_pristine_dk_value` already applied to values, extended
+to the detector: `reconcile()` reconstructs the pristine DK value for every row
+*first*, then derives the off-slate games from those. `off_slate_sides()` takes
+the values as an argument rather than a connection so it cannot accidentally read
+the corrupted column; `off_slate_games(conn)` remains as the pre-write probe.
+Pinned by `test_the_off_slate_flag_survives_a_second_pass`.
+
+Related, and load-bearing: **`write_audit` runs before `apply_corrections`.** A
+crash between them leaves an audit row whose `ops_value` differs from the
+untouched `actual_fpts`, which is exactly the "correction is not in place" branch
+of `_pristine_dk_value`, so the next pass still recovers the true DK value. The
+other order would lose it permanently.
+
+### 5.5 Still open
+
+- **2026-01-25 DAL/MIL (36 rows)** — unchanged from §4. `action='no_ops_row'`,
+  `reason='no_ops_game'`, `off_slate=1`. The only matchup in 2,306 that resolves
+  to nothing on any of the three dates.
+- **`dk_unscored` (61 rows / 18 players)** — the cause is still not established.
+  The report lists all 61 by name under `--write`-less runs so they can be looked
+  at; ops wins either way under D2.
+- **Orchestrator wiring** — still deferred, per §3.4.
