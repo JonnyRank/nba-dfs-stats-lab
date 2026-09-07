@@ -1,0 +1,68 @@
+# Why this exists.
+#
+# Three review rounds on PR #11 — the Claude reviewer twice and CodeRabbit once —
+# and not one of them could execute `pytest` or `ruff`: uv isn't on the runner's
+# PATH for those jobs and direct python3 calls need an approval they don't hold.
+# Every "349 tests, ruff clean" claim on that PR was therefore unverified by
+# anybody but the author. This job makes green a fact.
+#
+# Deliberately separate from the reviewer workflows in claude-auto-pr-once.yml:
+# those are agents that read code and comment, this is a build. A reviewer being
+# unable to run the suite should never again mean the suite went unrun.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only: this job builds and tests, it never writes to the repo.
+permissions:
+  contents: read
+
+# A new push supersedes the run in flight for the same branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: ruff + pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      # Both interpreters are reported, not just the first to fail — the point
+      # of the matrix is to tell them apart.
+      fail-fast: false
+      matrix:
+        # CLAUDE.md's cloud-environment note says 3.14.2 and the image's 3.13 are
+        # *both* healthy states, and that "the lockfile pins identical package
+        # versions on both interpreters". Nothing tested that claim until now.
+        # 3.14 is the local pin in `.python-version`; 3.13 is the documented
+        # fallback and the floor set by `requires-python`.
+        python-version: ["3.13", "3.14"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        # Pinned to an exact release, not a moving major tag: astral-sh/setup-uv
+        # stopped publishing those after v7, so `@v10` does not resolve.
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        # --locked fails rather than silently re-resolving, so a lockfile that
+        # has drifted from pyproject.toml is itself a CI failure. Installs the
+        # `dev` group (pytest, ruff) by default.
+        run: uv sync --locked
+
+      - name: ruff
+        run: uv run ruff check .
+
+      - name: pytest
+        run: uv run pytest -q
