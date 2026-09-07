@@ -1,4 +1,4 @@
-"""Analytics DB schema — DDL for the five tables, pinned to docs/ingestion-plan.md.
+"""Analytics DB schema — DDL for the six tables, pinned to docs/ingestion-plan.md.
 
 `init_db` is idempotent (every statement is IF NOT EXISTS), so calling it on an
 existing database is a safe no-op.
@@ -8,7 +8,7 @@ import sqlite3
 
 # Bump when the DDL below changes shape; stored in PRAGMA user_version so a
 # future migration (or a "rebuild from scratch" decision) can detect drift.
-SCHEMA_VERSION = 2  # v2: lineups.proj_rank / geo_rank INTEGER -> REAL (see DDL note)
+SCHEMA_VERSION = 3  # v3: fpts_audit added (Phase 6); v2: lineups ranks INTEGER -> REAL
 
 DDL = """
 CREATE TABLE IF NOT EXISTS dk_crosswalk (
@@ -70,9 +70,58 @@ CREATE TABLE IF NOT EXISTS lineup_players (
 
 CREATE INDEX IF NOT EXISTS ix_lineup_players_slate_dk
   ON lineup_players (slate_id, dk_id);      -- exposure rollups
+
+-- Phase 6. A full census of slate_players: one row per (slate_id, dk_id),
+-- reconciled or not. A census rather than a change log because it makes the
+-- audit self-verifying (COUNT(fpts_audit) == COUNT(slate_players) is a gate
+-- check) and answers "why is this row 0?" for every row, not just the 1,144
+-- that moved.
+CREATE TABLE IF NOT EXISTS fpts_audit (
+  slate_id   TEXT    NOT NULL,
+  dk_id      INTEGER NOT NULL,
+  player_id  INTEGER,                       -- NULL when uncrosswalked
+  game_date  TEXT,                          -- the ops DATE used; may differ from the slate date
+  dk_value   REAL,                          -- the pristine value as ingested from the DK CSV
+  ops_value  REAL,                          -- ops DK_POINTS; NULL when no ops row
+  delta      REAL,                          -- ops_value - dk_value
+  action     TEXT    NOT NULL,              -- corrected | unchanged | no_ops_row | unmapped
+  reason     TEXT,                          -- the primary cause; see ingest/reconcile.py
+  -- A property of the *game*, not of the row's cause, so it can't live in
+  -- `reason`: 209 rows span three actions and three reasons (off_slate,
+  -- no_ops_game for 2026-01-25 DAL/MIL, no_crosswalk for Alex Toohey). A
+  -- backtest excludes the population with this flag alone.
+  off_slate  INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (slate_id, dk_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_fpts_audit_action ON fpts_audit (action, reason);
 """
 
-TABLES = ("dk_crosswalk", "slate_players", "projections", "lineups", "lineup_players")
+# Checked by `migrate`. Kept beside the DDL so the two can't drift apart —
+# `test_db_migrate.py` pins them equal.
+FPTS_AUDIT_COLUMNS = frozenset(
+    {
+        "slate_id",
+        "dk_id",
+        "player_id",
+        "game_date",
+        "dk_value",
+        "ops_value",
+        "delta",
+        "action",
+        "reason",
+        "off_slate",
+    }
+)
+
+TABLES = (
+    "dk_crosswalk",
+    "slate_players",
+    "projections",
+    "lineups",
+    "lineup_players",
+    "fpts_audit",
+)
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -145,6 +194,33 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
                 )
             conn.execute("DROP TABLE lineups")
             actions.append(f"recreated empty `lineups`; {stale} were not REAL")
+
+    # v2 -> v3: `fpts_audit` is new, so on every real DB today this step finds
+    # nothing and init_db's IF NOT EXISTS creates the table. It exists for the
+    # DB that already has a table of that name with the wrong shape — a
+    # hand-made one, or a future column change — which IF NOT EXISTS would
+    # silently leave in place while stamping v3 over it.
+    #
+    # It refuses rather than dropping, for a sharper reason than the lineups
+    # step: `dk_value` is the pristine DK figure, and once `apply_corrections`
+    # has overwritten `slate_players.actual_fpts` this table is the *only*
+    # record of what DraftKings said. Dropping it populated would destroy data
+    # that no re-run can rebuild — only a re-ingest from the source CSVs could.
+    if "fpts_audit" in existing:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(fpts_audit)")}
+        missing = sorted(FPTS_AUDIT_COLUMNS - columns)
+        if missing:
+            held = conn.execute("SELECT COUNT(*) FROM fpts_audit").fetchone()[0]
+            if held:
+                raise SchemaMigrationError(
+                    f"fpts_audit holds {held} row(s) but is missing column(s) {missing}. "
+                    "Its dk_value column is the only record of the pristine DraftKings "
+                    "values once corrections are applied, so this is not dropped "
+                    "automatically. Re-ingest the affected slates to restore them, or "
+                    "delete data/analytics.db and rebuild."
+                )
+            conn.execute("DROP TABLE fpts_audit")
+            actions.append(f"recreated empty `fpts_audit`; missing column(s) {missing}")
 
     if actions:
         conn.commit()

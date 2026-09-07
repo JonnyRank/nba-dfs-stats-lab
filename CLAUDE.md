@@ -12,8 +12,36 @@ Ingest DraftKings DFS data into a local SQLite analytics DB (`data/analytics.db`
 
 _Update at every gate before `/clear`: done / next / decisions. Keep it short._
 
-**Current phase:** Phase 6 / ops reconciliation — **spec approved 2026-08-09, no code written.** Read `docs/phase6-ops-reconciliation.md` first; it holds the survey, the four approved decisions, and the build plan.
-**Last gate cleared:** Phase 5 — `uv run python scripts/verify_phase5.py --write --apply docs/crosswalk-approvals.csv`, all 22 PASS 2026-08-09. **`dk_crosswalk` is built: 51,734 rows.**
+**Current phase:** Phase 6 **done** — ops reconciliation shipped and applied 2026-09-07. `docs/phase6-ops-reconciliation.md` is the spec; its **§5 *As built*** carries the three places the implementation departs from §1-§3 and why. Next phase not yet chosen.
+**Last gate cleared:** Phase 6 — `uv run python scripts/verify_phase6.py --write`, all 27 PASS 2026-09-07. **`fpts_audit` is built: 51,971 rows; 930 `actual_fpts` values corrected.**
+
+### Phase 6 results (2026-09-07) — 930 of 51,971 rows corrected, 27 of 27 PASS
+
+**Reproduce from scratch** (no human in the loop — `reconcile` is idempotent and re-derives everything from the two DBs):
+```sh
+uv run python scripts/verify_phase6.py            # report only, writes nothing
+uv run python scripts/verify_phase6.py --write    # apply + build the audit, then re-check
+```
+
+| `action` | Rows | | `reason` | Rows |
+|---|---|---|---|---|
+| `corrected` | 930 | | *(none)* | 30,795 |
+| `unchanged` | 31,032 | | `dnp` | 19,678 |
+| `no_ops_row` | 19,772 | | `float_noise` | 680 |
+| `unmapped` | 237 | | `no_crosswalk` | 237 |
+| **total** | **51,971** | | `date_shift` | 232 |
+| | | | `off_slate` | 172 |
+| | | | `stat_correction` | 80 |
+| | | | `dk_unscored` | 61 |
+| | | | `no_ops_game` | 36 |
+
+The 930 corrections are 680 `float_noise` + 109 `off_slate` + 80 `stat_correction` + 61 `dk_unscored`. Net change **+2,747.42** fantasy points; largest single move **+55.00** (Kawhi Leonard, `2025-10-26_classic_main` — an off-slate 0.00 becoming a real box score, not a scoring change).
+
+**Two incidental confirmations from the write output**, worth more than the checks that asserted them:
+- `TOTAL(actual_fpts)` after the write is **698,900.75**, *exactly* `TOTAL(ops_value)`. That can only hold if every one of the 20,009 rows without an ops value sits at exactly 0.0 — D2's "DNP zeros stay 0" verified by arithmetic rather than by rule.
+- `TOTAL(dk_value)` is **696,153.32999998**. That trailing `.32999998` **is** the 680 float-noise rows; post-correction the total is a clean quarter-granular figure.
+
+**The `off_slate` flag is 209 rows spanning three reasons** — 172 `off_slate`, 36 `no_ops_game` (DAL/MIL), 1 `no_crosswalk` (Alex Toohey) — and four actions: 109 `corrected`, 94 `no_ops_row`, 5 `unchanged`, 1 `unmapped`. That spread is exactly why it is a column and not a `reason` value (see Decisions).
 
 ### Phase 5 results (2026-08-09) — 599 of 610 names mapped
 
@@ -61,17 +89,22 @@ All 22 gate checks PASS: 0 ambiguous, 0 normalization collisions on either side,
   - **PR #10 review round** closed four silent-write holes, none of them reachable on today's snapshot but all of them the same failure mode the module exists to prevent: a `dk_id` under two names (see Decisions), an empty normalized key auto-matching two unrelated players, a sub-floor near miss being approvable, and the gate's `dk_id` uniqueness check being a tautology over its own PRIMARY KEY. Also: `_failures` now resets per `main()` (the gate was not re-entrant, which made the suite order-dependent), a missing `ops.dim_players` is a FAIL line rather than a traceback, the collision gate filters NULL/blank names and buckets ops `player_id`s so duplicate ops names are visible to it, `TRIM(name)` is consistent across all five name-grouping queries, and the tracked approvals CSV is pinned by tests.
   - **A gate check that cannot fail is worse than no check** — it reads as coverage. Three were found this round. Two were tautologies over a PRIMARY KEY or over `approvable`'s own definition (no data could fail either); the third only ran under `--write`, so it answered its question after the write it guarded. When adding a check, ask what data would make it FAIL — if the answer is "none", it belongs somewhere else or nowhere. `--rebuild` also picked up its first tests at both layers.
 
+- **Phase 6** (this branch): `ingest/reconcile.py` — `build_game_index`, `resolve_game_dates` (exact → +1 → −1, per *matchup*), `load_ops_points`, `off_slate_sides`/`off_slate_games`, `reconcile()` → a `ReconcileReport` of `AuditRow`s, `write_audit` (delete-then-insert per slate), `apply_corrections`, `audit_rollup`. CLI: `--write`, `--slate`, `--audit`, `-v`, and a **"What --write will do"** preview on the report-only path. Plus `fpts_audit` DDL + `SCHEMA_VERSION` 3 + a v2→v3 `migrate()` step, and `scripts/verify_phase6.py` (27 checks). **349 pytest tests, ruff clean.**
+  - **A bug the idempotency test found, that nothing else would have.** The off-slate signature is "every rostered player on both sides at exactly 0" — and `apply_corrections` overwrites precisely those zeros. Read from the live `actual_fpts`, the detector finds the six games on the first pass and **nothing** on the second: `off_slate` silently drops from all 209 rows, taking D3's whole point with it, while every other check still passes. Fixed by deriving off-slate from the **pristine** DK values (see Decisions). The same class as §3.4's `dk_value` problem, one level up — the reconciliation corrupting the very signal it was computed from.
+  - **`write_audit` runs before `apply_corrections`**, and the order is load-bearing. A crash between them leaves an audit row whose `ops_value` differs from the untouched `actual_fpts` — exactly the "correction is not in place" branch of `_pristine_dk_value` — so the next pass still recovers the true DK value. The other order loses it permanently.
+
 **Side quest (done): lineups filename reconciliation**
 - The optimizer named `ranked-lineups-*` files from run time, not slate date. `scripts/match_lineups_to_slates.py` matches each file to its true slate by DK ID set intersection (DK ID blocks are disjoint across slates — verified, 0 collisions across 409 slates). 219/226 matched at 100% coverage; 26 dates and 5 slate types corrected. Write-up in `data/lineups_slate_match/README.md` (gitignored); corrected copies in `relabeled/`.
 - 7 files are unmatchable: no slate CSV exists for Feb 13–22, 2026. Parked in `unmatched/`.
 
-**Next — Phase 6, ops reconciliation.** Spec and survey: **`docs/phase6-ops-reconciliation.md`** (tracked). Approved 2026-08-09; nothing built yet.
+**Phase 6 — shipped 2026-09-07.** Spec, survey and *As built*: **`docs/phase6-ops-reconciliation.md`** (tracked). The survey below is the 2026-08-09 read-only pass that justified the phase; §5 of the spec records where the build departed from it.
 
 - **Approved decisions:** overwrite `slate_players.actual_fpts` in place from ops + a full-census `fpts_audit` table · game-level join with ±1-day resolution, no nulling · overwrite the 209 off-slate rows but tag them `off_slate` · this doc is the spec, `docs/ingestion-plan.md` gets its Phase 6 section when the phase is built.
 - **The survey (2026-08-09, read-only, nothing written):** 31,730 rows land on an ops log by exact date and **30,800 agree (97.1%)**. The 930 that don't split cleanly by cause — **680** float noise in the DK CSV (`25.746666666666663` against ops' `25.75`; ops is quarter-granular, the CSV isn't) · **109** off-slate · **61** DK settling a player at 0 who played · **80** stat corrections, every delta a legal DK quantum (±2.0 a steal/block, ±1.25 a rebound, ±1.5 an assist) **cancelling within a game**. That last class is the case for the phase: **DK's file is frozen at settlement, ops is post-correction.**
 - **New class found 2026-08-09 — `dk_unscored`, 61 rows / 18 players.** DK's file has them at exactly `0`; ops has a full box score with real minutes (0.9–31.0). Moussa Cisse 0 vs 33.75, Jase Richardson 0 vs 28.75. Same shape as an off-slate game but at **player** grain, so `check_zero_scored_games` can't see it and the Phase 4 backfill never flagged it. Fringe and two-way names, recurring across slates — looks like late roster additions DK never scored, but **the cause is not established**. Doesn't change the design (ops wins either way); it gets its own `reason` so it stays separable.
 - **The off-slate games were played** — this inverts the parked assumption. 5 of the 6 have full ops box scores (2025-10-26 LAC/POR has Harden 52.0, Kawhi 55.0 against analytics' 0.0), so the repair is overwrite, not null. Only **2026-01-25 DAL/MIL (36 rows)** is absent from ops on every 2026 date; Jonny is investigating that one separately.
-- Build order: `ingest/reconcile.py` · `fpts_audit` DDL + `SCHEMA_VERSION` 3 · `scripts/verify_phase6.py` (14 checks) · tests both layers.
+- **Built as specified except for three things**, all in the spec's §5: `off_slate` became a **column** rather than a `reason` value; `date_shift` marks the 232 rows that *took* a shifted value rather than 214 corrections (the shift repairs `game_date`, not the value); and the two-day-slate finding is **10 slates / 20 game-sides**, not one. The gate shipped with **27** checks, not 14.
+- **Still open:** 2026-01-25 DAL/MIL (36 rows, `no_ops_game`) — Jonny investigating · `dk_unscored`'s cause still not established · orchestrator wiring still deferred.
 - Small follow-up: warnings are logged twice on the write path — once by `ingest_*` (keyed by filename) and once by `ingest_slate` (keyed by source), so `--backfill` prints each one as a pair. Cosmetic only; the counted tally is right.
 
 **Local working notes** (gitignored via `docs/*.local.md`, so a fresh session sees them on disk but not in git):
@@ -79,6 +112,9 @@ All 22 gate checks PASS: 0 ambiguous, 0 normalization collisions on either side,
 - `docs/actual-fpts-zero-games.local.md` — the off-slate-game finding in full. Its repair suggestion ("null the 208 values, or overwrite…") is settled: **overwrite** — see the amendment in Decisions.
 
 **Decisions / notes** — the *why*, where the code alone doesn't carry it.
+- **`off_slate` is a column on `fpts_audit`, not a `reason` value** (2026-09-07, Jonny). `reason` holds one primary cause per row, and the spec asked it to carry two orthogonal facts at once: D3 wants all **209** off-slate rows tagged, while §1.3 wants the 36 DAL/MIL rows reading `no_ops_game`. A third collision turned up in the build — **Alex Toohey** (GSW, `2025-10-28`) is inside an off-slate game *and* one of the 11 uncrosswalked names, so his row wants `no_crosswalk` too. That single row is why a `reason`-only detector counts 208 where D3 says 209. Off-slate is a property of the **game**; the cause is a property of the **row**. So the flag carries the population (`WHERE off_slate = 1`, 209 rows, 4 actions) and `reason` keeps the narrower cause (172 `off_slate` + 36 `no_ops_game` + 1 `no_crosswalk`). Precedence: `no_crosswalk` → `no_ops_game` → `off_slate` → value cause / `date_shift` / `dnp`. `off_slate` sits *above* the value causes so the 109 corrections on games DK never scored don't collapse into `dk_unscored` — true of them, but it would hide the game-level fact and make those corrections unfindable by reason.
+- **The off-slate detector must read the *pristine* DK values, or it eats itself on the second pass** (2026-09-07, found by a test). The signature is "every rostered player on both sides of a matchup at exactly 0" — and `apply_corrections` overwrites exactly those zeros. Sourced from the live `actual_fpts`, the detector finds the six games once and **never again**: `off_slate` silently drops from all 209 rows, and with it the only thing that makes them excludable from a backtest. Nothing else catches it — the second run passes every other check, because every other check is consistent with the corrupted state. So `reconcile()` reconstructs every row's pristine `dk_value` **first**, then derives the off-slate games from those. `off_slate_sides()` takes values as an argument rather than a connection so it *cannot* read the corrupted column; `off_slate_games(conn)` survives as the pre-write probe only. This is the §3.4 `dk_value` problem one level up — a reconciliation corrupting the signal it was computed from — so assume any other derived-from-`actual_fpts` signal has it too. Pinned by `test_the_off_slate_flag_survives_a_second_pass`.
+- **`date_shift` marks where a value came *from*, not that it changed** (2026-09-07, Jonny). The spec pinned it as 214 `corrected` rows; it is 232 `unchanged` ones. Those rows *already agree* with ops once the right date is used — the ±1 resolution repairs `game_date`, not the value, and **zero** corrections live on a shifted game. The 20 shifted game-sides hold 359 rows: 232 that take a value from the shifted date, 122 DNPs (`dnp`; their shift is still visible in `game_date`), and 5 uncrosswalked, which is why the gate reports **354** rows on a shifted `game_date` rather than 359. Related: the two-day-slate finding is bigger than §1.4 recorded — **10 slate dates, 20 game-sides** (`2026-05-12`, `05-17`, and every slate `05-18`→`05-25`), because the conference finals ran two series on alternating nights and DK listed **both** on every file. And **+1 must be tried before −1**: on the `05-21` slate OKC/SAS exists in ops at both 05-20 and 05-22, and only a game yet to tip off can be on a slate.
 - **`dk_id` is per-slate, not per-player** (found 2026-08-09). All 51,971 `slate_players` rows carry a distinct `dk_id` but there are only **610 distinct names** — DK re-issues an id every slate. So the crosswalk *matches* over names (610 human-sized decisions) and *writes* at the `dk_id` grain (51,971 rows), which is what makes `dk_crosswalk` joinable straight from `slate_players` as its pinned DDL intends. Any future "one row per player" instinct about that table is wrong.
 - **Only the two deterministic tiers auto-write; fuzzy always goes to Jonny.** `EXACT` (identical source strings) and `NORMALIZED` (identical after `normalize_name`) write unattended. Everything else is a *proposal* — `NameMatch.player_id` stays `None` until approved, so nothing downstream can mistake one for a decision. The gap on the current data is wide (true 0.93/0.80 vs best false 0.73), but it's a gap between two handfuls of names, not a law: `RJ Davis`/`Ed Davis` and `Cameron Matthews`/`Wesley Matthews` are the pairs a threshold eventually gets wrong, and a bad crosswalk row silently mis-attributes *every* box score for that player. Cheap to review, expensive to be wrong.
 - **`score_candidate` blends three signals because ratio alone provably can't do it.** Character ratio ranks the false `RJ Davis`→`JD Davison` (0.78) *above* the true `Yanic Niederhauser`→`Yanic Konan Niederhauser` (0.86 but with far more moved characters). Adding token containment + a surname check separates them. The ratio is also taken over **sorted tokens**, whichever is kinder — that is what catches `Hansen Yang` → ops `Yang Hansen`, which read left-to-right is only 0.57 similar, i.e. *below the review floor and invisible*. Reversed given/family order is a standing feature of NBA rosters, not a one-off; it was caught only because the report prints the nearest candidate for unmatched names too.
@@ -169,7 +205,7 @@ lineups:     ranked-lineups-[<Type>-]<YYYY-MM-DD>[_<HHMMSS>].csv
 
 ---
 
-## Five tables
+## Six tables
 
 | Table | Grain | Source |
 |---|---|---|
@@ -177,7 +213,8 @@ lineups:     ranked-lineups-[<Type>-]<YYYY-MM-DD>[_<HHMMSS>].csv
 | `projections` | `(slate_id, dk_id)` | projections CSV |
 | `lineups` | `(slate_id, final_rank)` | lineups CSV (header rows) — `relabeled/`, keep-latest by manifest |
 | `lineup_players` | `(slate_id, final_rank, slot)` | lineups CSV (melted slots) |
-| `dk_crosswalk` | `dk_id` | built last, from ops DB match |
+| `dk_crosswalk` | `dk_id` | built after the backfill, from ops DB match |
+| `fpts_audit` | `(slate_id, dk_id)` | Phase 6 — a **full census** of `slate_players`, not a change log |
 
 ### Column mappings
 
@@ -231,4 +268,4 @@ src/nba_dfs_stats_lab/
 - Showdown game style (its own files and tables — later phase).
 - Actual ownership (not in any current file).
 
-_Ops reconciliation was listed here through Phase 5. It is **now in scope** as Phase 6 — see `docs/phase6-ops-reconciliation.md`._
+_Ops reconciliation was listed here through Phase 5, came **into scope** as Phase 6, and **shipped 2026-09-07** — see `docs/phase6-ops-reconciliation.md`._

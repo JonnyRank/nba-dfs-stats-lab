@@ -1,4 +1,4 @@
-"""The v1 -> v2 schema step (lineups rank columns INTEGER -> REAL)."""
+"""The schema migrations: v1 -> v2 (lineups rank columns) and v2 -> v3 (fpts_audit)."""
 
 import re
 
@@ -6,6 +6,7 @@ import pytest
 
 from nba_dfs_stats_lab.db.connection import get_connection
 from nba_dfs_stats_lab.db.schema import (
+    FPTS_AUDIT_COLUMNS,
     SCHEMA_VERSION,
     SchemaMigrationError,
     init_db,
@@ -167,4 +168,85 @@ def test_stale_lineups_with_both_tables_empty_still_migrates(tmp_path):
     assert len(migrate(conn)) == 1
     init_db(conn)
     assert _rank_types(conn)["proj_rank"] == "REAL"
+    conn.close()
+
+
+# --- v2 -> v3: fpts_audit ------------------------------------------------------
+
+# The shape a hand-made or pre-v3 audit table might have: no `off_slate`, which
+# is the column that carries the whole 209-row off-slate population.
+V2_FPTS_AUDIT_DDL = """
+CREATE TABLE fpts_audit (
+  slate_id  TEXT    NOT NULL,
+  dk_id     INTEGER NOT NULL,
+  player_id INTEGER,
+  game_date TEXT,
+  dk_value  REAL,
+  ops_value REAL,
+  delta     REAL,
+  action    TEXT    NOT NULL,
+  reason    TEXT,
+  PRIMARY KEY (slate_id, dk_id)
+);
+"""
+
+
+def _audit_columns(conn):
+    return {r[1] for r in conn.execute("PRAGMA table_info(fpts_audit)")}
+
+
+def test_fpts_audit_column_list_matches_the_ddl():
+    # migrate() detects drift by comparing against FPTS_AUDIT_COLUMNS, so if the
+    # two fall out of step the migration silently checks the wrong thing.
+    conn = get_connection(":memory:")
+    init_db(conn)
+    assert _audit_columns(conn) == set(FPTS_AUDIT_COLUMNS)
+    conn.close()
+
+
+def test_empty_v2_audit_table_is_recreated(tmp_path):
+    conn = get_connection(tmp_path / "v2audit.db")
+    conn.executescript(V1_LINEUPS_DDL.replace("INTEGER,\n  own_rank", "REAL,\n  own_rank"))
+    conn.executescript(V2_FPTS_AUDIT_DDL)
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+
+    actions = migrate(conn)
+    assert any("fpts_audit" in a and "off_slate" in a for a in actions), actions
+    init_db(conn)
+    assert "off_slate" in _audit_columns(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    conn.close()
+
+
+def test_populated_v2_audit_table_refuses_rather_than_dropping(tmp_path):
+    # dk_value is the only surviving record of what DraftKings said once
+    # apply_corrections has overwritten actual_fpts. Dropping it populated
+    # destroys data no re-run can rebuild — only a re-ingest could.
+    conn = get_connection(tmp_path / "v2audit_full.db")
+    conn.executescript(V2_FPTS_AUDIT_DDL)
+    conn.execute(
+        "INSERT INTO fpts_audit (slate_id, dk_id, dk_value, ops_value, action) "
+        "VALUES ('2026-05-18_classic_main', 100, 54.0, 52.0, 'corrected')"
+    )
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+
+    with pytest.raises(SchemaMigrationError, match="fpts_audit holds 1 row"):
+        migrate(conn)
+    assert conn.execute("SELECT dk_value FROM fpts_audit").fetchone()[0] == 54.0
+    assert "off_slate" not in _audit_columns(conn)
+    conn.close()
+
+
+def test_current_audit_table_is_left_alone(tmp_path):
+    conn = get_connection(tmp_path / "v3.db")
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO fpts_audit (slate_id, dk_id, dk_value, action, off_slate) "
+        "VALUES ('2026-05-18_classic_main', 100, 54.0, 'unchanged', 0)"
+    )
+    conn.commit()
+    assert migrate(conn) == []
+    assert conn.execute("SELECT COUNT(*) FROM fpts_audit").fetchone()[0] == 1
     conn.close()
