@@ -260,6 +260,31 @@ def resolution_gate(report: ReconcileReport) -> None:
         else f"{len(report.shifted_rows())} shifted row(s), all matchup-wide",
     )
 
+    # A shift means the resolver picked a *different game* than the slate date
+    # implies, and the only evidence it picked the right one is that the frozen
+    # DK values already agree with it: 232 rows landing on a +1 date and
+    # matching to the cent is not a coincidence, it is a two-day slate.
+    #
+    # A postponement would look identical to the resolver — right matchup,
+    # wrong game — and would show up here as corrections on a shifted date.
+    # That is the 907-row trap one level up, so the evidence is made a check
+    # rather than left as a finding in the PR body. Like the pinned censuses
+    # this fails on new data rather than on a defect: a genuine stat correction
+    # on a two-day-slate game would also trip it. Either way it is a prompt to
+    # look at the game before trusting the number.
+    shifted_corrections = [r for r in report.corrections if r.shifted]
+    check(
+        "no correction lands on a date-shifted game",
+        not shifted_corrections,
+        f"{len(shifted_corrections)} row(s): "
+        + ", ".join(
+            f"{r.name or r.dk_id} {r.slate_date}->{r.game_date} ({r.delta:+.2f})"
+            for r in shifted_corrections[:3]
+        )
+        if shifted_corrections
+        else f"{len(report.shifted_rows())} shifted row(s), all already agreeing",
+    )
+
     unresolved = report.unresolved_sides()
     note(
         "unresolved matchups",
@@ -468,6 +493,25 @@ def main(argv=None) -> int:
         "--slate", metavar="SLATE_ID", action="append", help="restrict to a slate (repeatable)"
     )
     args = parser.parse_args(argv)
+
+    # `--slate` is a report-only convenience. Everything the write stage checks
+    # — the census both ways, the action totals, the 209-row off-slate
+    # population — is a whole-DB question, and `idempotency_gate` re-runs the
+    # *entire* pass to prove a second one moves nothing. Honouring `--write`
+    # here would therefore write every slate while the caller asked for one
+    # (PR #11 review). Scoping the gate instead would leave it unable to answer
+    # the questions it exists to answer, so the scoped write belongs to the
+    # module CLI, which does it correctly.
+    if args.write and args.slate:
+        print(
+            "--write cannot be combined with --slate: this gate's checks and its "
+            "idempotency re-run are whole-DB.\n"
+            "For a scoped write use the module CLI:\n"
+            "  uv run python -m nba_dfs_stats_lab.ingest.reconcile --write "
+            + " ".join(f"--slate {s}" for s in args.slate),
+            file=sys.stderr,
+        )
+        return 2
 
     conn = get_connection()
     try:

@@ -26,6 +26,7 @@ from nba_dfs_stats_lab.ingest.reconcile import (
     load_prior_audit,
     off_slate_games,
     off_slate_sides,
+    ops_window,
     reconcile,
     resolve_game_dates,
     slate_game_sides,
@@ -100,9 +101,16 @@ SLATE_ROWS = [
 CROSSWALKED = {dk_id for dk_id, *_ in SLATE_ROWS} - {11}
 
 
+# The one test that appends a next-season ops row needs the file back; the
+# ATTACH is read-only by design, so it detaches, writes, and re-attaches.
+_ops_paths: list = []
+
+
 @pytest.fixture
 def conn(tmp_path):
     ops_path = tmp_path / "ops.db"
+    _ops_paths.clear()
+    _ops_paths.append(ops_path)
     ops = sqlite3.connect(ops_path)
     ops.executescript(
         """
@@ -529,3 +537,91 @@ def test_audit_rollup_reports_the_stored_census(conn):
 
 def test_audit_rollup_on_an_empty_table(conn):
     assert audit_rollup(conn)["actions"] == []
+
+
+# --- PR #11 review round -------------------------------------------------------
+
+
+def test_the_ops_window_is_derived_from_the_slates_not_hardcoded(conn):
+    # A hardcoded season start silently bounds the pass to one season: the first
+    # slate of the next one finds no game-sides and every row lands as
+    # `no_ops_game` — the right action by accident, the wrong reason.
+    assert ops_window(conn) == "2026-05-17"  # earliest slate date, minus one day
+
+    conn.execute(
+        "INSERT INTO slate_players (slate_id, dk_id, name, team, opp, salary, actual_fpts) "
+        "VALUES ('2027-01-04_classic_main', 900, 'Next Season', 'BOS', 'NYK', 5000, 0.0)"
+    )
+    assert ops_window(conn) == "2026-05-17"  # still bounded by the earliest
+    assert ops_window(conn, slate_ids=["2027-01-04_classic_main"]) == "2027-01-03"
+
+
+def test_the_ops_window_of_an_empty_db_loads_nothing(conn):
+    conn.execute("DELETE FROM slate_players")
+    assert ops_window(conn) == "9999-12-31"
+
+
+def test_a_next_season_slate_still_resolves_its_games(conn):
+    # The regression the hardcoded window would have caused. Ops gains a game a
+    # season later; a bounded scan would never see it.
+    conn.execute(
+        "INSERT INTO slate_players (slate_id, dk_id, name, team, opp, salary, actual_fpts) "
+        "VALUES ('2027-01-04_classic_main', 1, 'Exact Agree', 'BOS', 'NYK', 5000, 41.0)"
+    )
+    conn.execute("DETACH DATABASE ops")
+    ops_path = [p for p in _ops_paths if p.name == "ops.db"][0]
+    ops = sqlite3.connect(ops_path)
+    ops.execute(
+        "INSERT INTO fantasy_logs (DATE, PLAYER_ID, TEAM, OPPONENT, MINUTES, DK_POINTS) "
+        "VALUES ('2027-01-04', 1, 'Boston Celtics', 'New York Knicks', 30.0, 41.0)"
+    )
+    ops.commit()
+    ops.close()
+    conn.execute("ATTACH DATABASE ? AS ops", (f"file:{ops_path.as_posix()}?mode=ro",))
+
+    row = next(
+        r for r in reconcile(conn).rows if r.slate_id == "2027-01-04_classic_main"
+    )
+    assert (row.action, row.reason, row.ops_value) == ("unchanged", None, 41.0)
+
+
+def test_a_half_null_side_is_not_read_as_off_slate():
+    # A missing value can't be shown to be 0, and the claim is about *every*
+    # player on the side — so partial evidence must not produce a game-level
+    # verdict that goes on to overwrite real box scores.
+    assert off_slate_sides(
+        [
+            ("s1", "LAC", "POR", 0.0),
+            ("s1", "LAC", "POR", None),
+            ("s1", "POR", "LAC", 0.0),
+        ]
+    ) == set()
+    # ...and the same matchup with the value present is still detected.
+    assert off_slate_sides(
+        [
+            ("s1", "LAC", "POR", 0.0),
+            ("s1", "LAC", "POR", 0.0),
+            ("s1", "POR", "LAC", 0.0),
+        ]
+    ) == {("s1", "LAC", "POR"), ("s1", "POR", "LAC")}
+
+
+def test_a_hand_fix_that_lands_on_the_ops_value_keeps_the_stale_dk_value(conn):
+    # The one case `_pristine_dk_value` cannot see, pinned so it is a known
+    # boundary rather than a surprise. The two states are indistinguishable
+    # from actual_fpts alone; it costs an audit row's accuracy, never a value.
+    first = reconcile(conn)
+    write_audit(conn, first.rows)
+    apply_corrections(conn, first.rows)
+
+    # Jonny fixes the source CSV to agree with ops exactly, and re-ingests.
+    conn.execute("UPDATE slate_players SET actual_fpts = 52.0 WHERE dk_id = 3")
+
+    row = next(r for r in reconcile(conn).rows if r.dk_id == 3)
+    assert row.dk_value == 54.0  # superseded, and not detectable from here
+    assert row.action == "corrected"
+
+    # The documented manual reset clears it.
+    conn.execute("DELETE FROM fpts_audit WHERE slate_id = ?", (MAIN,))
+    repinned = next(r for r in reconcile(conn).rows if r.dk_id == 3)
+    assert (repinned.dk_value, repinned.action, repinned.reason) == (52.0, "unchanged", None)

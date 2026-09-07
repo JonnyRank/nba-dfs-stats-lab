@@ -49,6 +49,10 @@ from nba_dfs_stats_lab.db.schema import SchemaMigrationError, init_db
 
 logger = logging.getLogger(__name__)
 
+# Passed as `since` when no window is given: earlier than any ops row, so an
+# unbounded scan is the default and a *wrong* bound is never the default.
+_NO_BOUND = "0001-01-01"
+
 # Day offsets tried, in order. Same-day first so a team playing on both `d` and
 # `d+1` is never ambiguous; +1 before -1 because a slate can only contain a game
 # that has yet to tip off — see the module docstring.
@@ -135,7 +139,7 @@ def _check_alias(alias: str) -> None:
 
 
 def build_game_index(
-    conn: sqlite3.Connection, alias: str = "ops", since: str = "2025-10-01"
+    conn: sqlite3.Connection, alias: str = "ops", since: str = _NO_BOUND
 ) -> dict[tuple[str, str, str], OpsGame]:
     """Every ops game-side as `(date, team, opp) -> OpsGame`, team abbreviations.
 
@@ -145,8 +149,11 @@ def build_game_index(
     here rather than guessed at — the gate counts what the index covers, so a
     future gap shows up as unresolved game-sides instead of as silence.
 
-    `since` bounds the scan to the current season; ops holds 190k rows over many
-    seasons and only 2025-10-01 onward can be reached from a slate date.
+    `since` bounds the scan; ops holds 190k rows over many seasons and only a
+    narrow window around the slate dates is reachable. `reconcile` passes the
+    bound `ops_window` derives from the data. The default here is *unbounded*
+    on purpose: a caller who forgets gets a slower correct answer rather than a
+    fast wrong one, which is the failure mode a hardcoded season start had.
     """
     _check_alias(alias)
     rows = conn.execute(
@@ -164,13 +171,15 @@ def build_game_index(
 
 
 def load_ops_points(
-    conn: sqlite3.Connection, alias: str = "ops", since: str = "2025-10-01"
+    conn: sqlite3.Connection, alias: str = "ops", since: str = _NO_BOUND
 ) -> dict[tuple[int, str], float]:
     """`(player_id, date) -> DK_POINTS` for the current season.
 
     Ops has zero NULL `DK_POINTS`, so a missing key means "no log for that
     player on that date" and never "logged but unscored" — which is what lets
     `reconcile` read absence as a DNP rather than as missing data.
+
+    `since` is bounded by `ops_window`, same as `build_game_index`.
     """
     _check_alias(alias)
     rows = conn.execute(
@@ -251,15 +260,29 @@ def off_slate_sides(
     played, DK just never scored them into that contest.
     """
     peak: dict[tuple[str, str, str], float] = {}
+    unknown: set[tuple[str, str, str]] = set()
     for slate_id, team, opp, value in rows:
-        if not team or not opp or value is None:
+        if not team or not opp:
             continue
         key = (slate_id, team, opp)
+        if value is None:
+            # A missing value cannot be shown to be 0, and the claim being made
+            # is about *every* rostered player on the side. Skipping the row
+            # instead would let a side that is half NULL and half 0.0 read as
+            # off-slate — a game-level verdict drawn from partial evidence, and
+            # the verdict overwrites real box scores. `actual_fpts` is 100%
+            # non-null today and D2 keeps it that way, but this function is
+            # written to outlive that guarantee.
+            unknown.add(key)
+            continue
         peak[key] = max(peak.get(key, 0.0), abs(value))
     return {
         (slate_id, team, opp)
         for (slate_id, team, opp), mx in peak.items()
-        if mx == 0 and peak.get((slate_id, opp, team)) == 0
+        if mx == 0
+        and (slate_id, team, opp) not in unknown
+        and peak.get((slate_id, opp, team)) == 0
+        and (slate_id, opp, team) not in unknown
     }
 
 
@@ -291,6 +314,32 @@ def _slate_filter(slate_ids: Sequence[str] | None) -> tuple[str, tuple]:
         # `load_slate` refuses for an empty frame.
         raise ReconcileError("slate_ids is empty — pass None to reconcile every slate")
     return f"slate_id IN ({', '.join('?' * len(slate_ids))})", tuple(slate_ids)
+
+
+def ops_window(conn: sqlite3.Connection, slate_ids: Sequence[str] | None = None) -> str:
+    """The earliest ops DATE this pass could possibly need.
+
+    Derived from the data rather than hardcoded. A literal season start was the
+    obvious thing to write and the wrong thing: it silently bounds the pass to
+    one season, so the first slate of the *next* one finds no game-sides at all
+    and every row of it lands as `no_ops_game` — the right `action` by accident
+    and the wrong `reason`, with nothing to catch it but the pinned census,
+    which is exactly the check a new season tells you to re-pin.
+
+    The earliest slate date shifted by the widest backward offset in `SHIFTS`
+    is the true bound. It also stops a `--slate` run loading a whole season of
+    `fantasy_logs` to answer a question about one night.
+    """
+    where, params = _slate_filter(slate_ids)
+    earliest = conn.execute(
+        f"SELECT MIN(substr(slate_id, 1, 10)) FROM slate_players WHERE {where}",  # noqa: S608 — placeholders only
+        params,
+    ).fetchone()[0]
+    if earliest is None:
+        # No slates in scope, so no ops row is reachable. A far-future bound
+        # loads nothing, which beats loading everything.
+        return "9999-12-31"
+    return _shift(earliest, min(SHIFTS))
 
 
 def load_prior_audit(
@@ -424,8 +473,23 @@ def _pristine_dk_value(
     reuse the prior audit row's `dk_value` when the correction is still in place
     (i.e. `actual_fpts` still equals the `ops_value` we wrote), otherwise take
     the current value as the new pristine one. A re-ingested slate, or a source
-    CSV Jonny has fixed by hand, lands in the second branch and re-pins itself
-    with no manual reset.
+    CSV Jonny has fixed by hand, normally lands in the second branch and
+    re-pins itself with no manual reset.
+
+    **The one case it cannot see** (PR #11 review): a hand-fixed CSV whose new
+    value lands *exactly* on the ops value. `current == prior_ops` is then true
+    for the wrong reason, branch 1 keeps the superseded `dk_value`, and the row
+    goes on reporting a correction that no longer exists. Nothing downstream can
+    detect it — `actual_fpts` is right either way, the census is intact, and the
+    digest doesn't move — because the two states are genuinely
+    indistinguishable from `actual_fpts` alone. It costs an audit row's accuracy,
+    never a value.
+
+    The real fix is for the re-ingest path to drop the slate's audit rows
+    (`DELETE FROM fpts_audit WHERE slate_id = ?`), which belongs with the
+    orchestrator wiring deferred in §3.4 — `load_slate` is generic over four
+    tables and shouldn't learn about this one. Until then, the manual reset is
+    `DELETE FROM fpts_audit WHERE slate_id = ?` before re-running the pass.
 
     This is also why `write_audit` runs *before* `apply_corrections`: a crash
     between them leaves an audit row whose `ops_value` differs from the
@@ -498,9 +562,10 @@ def reconcile(
     Charlotte rows removed the last of them), but the salary contract permits a
     blank team with a warning, so the path stays.
     """
-    index = build_game_index(conn, alias=alias)
+    since = ops_window(conn, slate_ids)
+    index = build_game_index(conn, alias=alias, since=since)
     links = resolve_game_dates(index, slate_game_sides(conn, slate_ids))
-    points = load_ops_points(conn, alias=alias)
+    points = load_ops_points(conn, alias=alias, since=since)
     prior = load_prior_audit(conn, slate_ids)
 
     crosswalk = {
@@ -861,10 +926,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_report(report)
 
         if not args.write:
-            print(
-                "\nNothing written (report only). Re-run with --write to apply "
-                f"{len(report.corrections)} correction(s) and build the audit."
-            )
+            command = "uv run python -m nba_dfs_stats_lab.ingest.reconcile --write"
+            if args.slate:
+                command += "".join(f" --slate {s}" for s in args.slate)
+            print_write_preview(report, command)
+            print("Nothing written (report only).")
             return 0
 
         # Audit first: a crash between the two leaves the pristine dk_value

@@ -406,3 +406,66 @@ def test_failures_do_not_leak_between_runs(gate, capsys, tmp_path):
     gate._failures.append("a failure from somewhere else")
     assert gate.main([]) == 0
     assert "All Phase 6 gate checks PASSED." in capsys.readouterr().out
+
+
+# --- PR #11 review round -------------------------------------------------------
+
+
+def test_write_with_slate_is_refused_and_writes_nothing(verify, monkeypatch, tmp_path, capsys):
+    # The gate's checks and its idempotency re-run are whole-DB, so honouring
+    # --slate here would write every slate while the caller asked for one.
+    db_path, ops_path = build_db(tmp_path)
+    _wire(verify, monkeypatch, db_path, ops_path)
+
+    assert verify.main(["--write", "--slate", MAIN]) == 2
+    err = capsys.readouterr().err
+    assert "--write cannot be combined with --slate" in err
+    assert "ingest.reconcile --write --slate" in err
+    assert read_db(db_path)["audit"] == {}  # nothing landed
+
+
+def test_a_second_slate_is_untouched_by_a_scoped_module_write(tmp_path):
+    # The counterpart: the module CLI *does* scope correctly, which is where
+    # the refusal above points. Proven at the API level.
+    from nba_dfs_stats_lab.ingest.reconcile import apply_corrections, reconcile, write_audit
+
+    db_path, ops_path = build_db(tmp_path)
+    conn = sqlite3.connect(db_path, uri=True)
+    conn.execute(
+        "INSERT INTO slate_players (slate_id, dk_id, name, team, opp, salary, actual_fpts) "
+        "VALUES ('2026-05-20_classic_main', 3, 'Stat Correction', 'NYK', 'BOS', 5000, 54.0)"
+    )
+    conn.commit()
+    conn.execute("ATTACH DATABASE ? AS ops", (f"file:{ops_path.as_posix()}?mode=ro",))
+
+    report = reconcile(conn, slate_ids=[MAIN])
+    write_audit(conn, report.rows)
+    apply_corrections(conn, report.rows)
+
+    assert {s for (s,) in conn.execute("SELECT DISTINCT slate_id FROM fpts_audit")} == {MAIN}
+    other = conn.execute(
+        "SELECT actual_fpts FROM slate_players WHERE slate_id = '2026-05-20_classic_main'"
+    ).fetchone()[0]
+    assert other == 54.0  # untouched
+    conn.close()
+
+
+def test_a_correction_on_a_shifted_game_fails(verify, monkeypatch, tmp_path, capsys):
+    # A postponement looks identical to the resolver — right matchup, wrong
+    # game — and surfaces as a correction on a shifted date. Today the shifted
+    # rows all already agree, which is the evidence the resolver matched the
+    # right game; this makes that evidence a check.
+    rows = [r for r in SLATE_ROWS if r[0] != 4]
+    rows.append((4, "Two Day Slate", "OKC", "SAS", 70.0))  # ops has 84.0 at +1
+    db_path, ops_path = build_db(tmp_path, slate_rows=rows)
+    _wire(verify, monkeypatch, db_path, ops_path, pin_fixture=False)
+
+    assert verify.main([]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] no correction lands on a date-shifted game" in out
+    assert "2026-05-18->2026-05-19" in out
+
+
+def test_the_shifted_check_passes_when_shifted_rows_agree(gate, capsys):
+    assert gate.main([]) == 0
+    assert "[PASS] no correction lands on a date-shifted game" in capsys.readouterr().out
